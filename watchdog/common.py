@@ -25,6 +25,7 @@ DEFAULTS = {
     "isolate_on_integrity": [],
     "ollama_model": "",
     "retention_days": 30,
+    "email_alerts": None,
 }
 
 
@@ -69,6 +70,9 @@ def configuration(path=CONFIG):
     model = settings["ollama_model"]
     if not isinstance(model, str) or (model and not re.fullmatch(r"[\w./:-]{1,100}", model, re.ASCII)):
         raise ValueError("Invalid ollama_model")
+    from .notifications import configuration as email_configuration
+
+    settings["email_alerts"] = email_configuration(settings["email_alerts"], path.parent.absolute())
     return settings
 
 

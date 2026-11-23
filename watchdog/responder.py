@@ -69,8 +69,8 @@ def notify(message):
         client.sendto(message.encode(), address)
 
 
-def heartbeat(uid, now, settings):
-    fd = os.open(MONITOR_RUNTIME / "heartbeat.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+def heartbeat(uid, now, settings, runtime=None):
+    fd = os.open((runtime or MONITOR_RUNTIME) / "heartbeat.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or not 0 < info.st_size <= 8192:
@@ -180,13 +180,17 @@ def supervise(settings):
         loop(settings)
 
 
-def loop(settings):
-    uid = pwd.getpwnam("ai-watchdog").pw_uid
+def loop(settings, user_directory=None):
+    user_observe = user_directory is not None
+    enforce = settings["enforce"] and not user_observe
+    response_state = user_directory / "response" if user_observe else RESPONSE_STATE
+    response_runtime = response_state if user_observe else RESPONSE_RUNTIME
+    uid = os.getuid() if user_observe else pwd.getpwnam("ai-watchdog").pw_uid
     started = uptime()
     last_responsive = None
     previous_status = None
     # Anchor the first startup grace to this boot, including across responder restarts.
-    marker = RESPONSE_STATE / "watchdog-boot.json"
+    marker = response_state / "watchdog-boot.json"
     try:
         previous = json.loads(marker.read_text())
         if previous["boot_id"] == BOOT_ID:
@@ -195,11 +199,11 @@ def loop(settings):
         pass
     write_json(marker, {"boot_id": BOOT_ID, "started": started})
     grace = settings["startup_grace"]
-    state = load_latch()
+    state = None if user_observe else load_latch()
     firewall_state = None
     failed_blocks = 0
     persisted = state is not None
-    macs = tuple(settings["blocked_macs"]) if settings["enforce"] else ()
+    macs = tuple(settings["blocked_macs"]) if enforce else ()
     notify("READY=1")
     while True:
         now = uptime()
@@ -207,7 +211,7 @@ def loop(settings):
         blocks = {}
         failures = []
         try:
-            request = heartbeat(uid, now, settings)
+            request = heartbeat(uid, now, settings, runtime=user_directory)
         except (OSError, ValueError, RecursionError):
             request = None
         responsive = request is not None and dashboard_alive(settings["port"])
@@ -223,7 +227,7 @@ def loop(settings):
         if request and request["isolate"]:
             reason = reason or "Repeated change to an isolation-critical file"
 
-        if reason and settings["enforce"] and state is None:
+        if reason and enforce and state is None:
             state = {"reason": reason, "boot_id": BOOT_ID, "links": {}}
         if state:
             reason = state["reason"]
@@ -234,7 +238,7 @@ def loop(settings):
                 except OSError as error:
                     failures.append("Isolation latch: " + type(error).__name__)
 
-        if settings["enforce"] and request and not state:
+        if enforce and request and not state:
             eligible = {
                 canonical: max(1, int(expiry - now)) for address, expiry in request["blocks"].items()
                 if type(expiry) in (int, float) and now < expiry <= now + 905
@@ -247,7 +251,7 @@ def loop(settings):
                 except ERRORS as error:
                     failures.append("Protected address inventory: " + type(error).__name__)
 
-        if settings["enforce"] or state:
+        if enforce or state:
             desired = (tuple(blocks), bool(state), macs)
             try:
                 # Reassert nonempty rules after firewall reloads without altering any unrelated table.
@@ -281,8 +285,8 @@ def loop(settings):
             logging.log(logging.CRITICAL if failures or reason else logging.INFO,
                         "Containment %s. %s %s", status, reason, " ".join(failures))
             previous_status = signature
-        write_json(RESPONSE_RUNTIME / "status.json", {
-            "boot_id": BOOT_ID, "at": uptime(), "mode": "enforce" if settings["enforce"] else "observe",
+        write_json(response_runtime / "status.json", {
+            "boot_id": BOOT_ID, "at": uptime(), "mode": "enforce" if enforce else "observe",
             "status": status, "isolated": bool(state) and not failures,
             "blocked": [*blocks, *macs] if firewall_state == (tuple(blocks), False, macs) else [],
             "reason": " ".join([part for part in [reason, *failures] if part]),

@@ -11,7 +11,7 @@ from .common import BASELINE, CONFIG, MONITOR_RUNTIME, configuration, write_json
 MONITOR_STATE = Path("/var/lib/ai-watchdog")
 
 
-def serve(settings, state, runtime, demo=False):
+def serve(settings, state, runtime, demo=False, baseline=BASELINE, response_runtime=None):
     from .monitor import Monitor
     from .server import Console
 
@@ -24,9 +24,10 @@ def serve(settings, state, runtime, demo=False):
         token = token_path.read_text().strip()
         if len(token) < 40:
             raise ValueError("Dashboard token is missing or too short")
-    monitor = Monitor(settings, state / "monitor.sqlite3", runtime, demo=demo)
+    monitor = Monitor(settings, state / "monitor.sqlite3", runtime, demo=demo,
+                      baseline=baseline, response_runtime=response_runtime)
     with Console(monitor, token) as console:
-        monitor.start()
+        console.start_workers()
         print(f"Dashboard: {console.origin}", flush=True)
         try:
             console.serve_forever()
@@ -41,6 +42,12 @@ def main():
     demo = actions.add_parser("demo", help="Start a dashboard using synthetic data")
     demo.add_argument("--port", type=int, default=8765)
     actions.add_parser("serve", help="Start the unprivileged monitor and authenticated dashboard")
+    for name, help_text in (
+        ("observe", "Start the unprivileged user monitor with enforcement disabled"),
+        ("observe-supervisor", "Start the unprivileged heartbeat supervisor"),
+    ):
+        observe = actions.add_parser(name, help=help_text)
+        observe.add_argument("--directory", type=Path, required=True)
     actions.add_parser("supervise", help="Start the independent containment watchdog")
     actions.add_parser("baseline", help="Record a known-good integrity baseline")
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
@@ -59,6 +66,34 @@ def main():
         if os.geteuid() == 0:
             parser.error("The monitor must run as an unprivileged user")
         serve(settings, MONITOR_STATE, MONITOR_RUNTIME)
+        return
+    if args.command in {"observe", "observe-supervisor"}:
+        if os.geteuid() == 0:
+            parser.error("User observation must run as an unprivileged user")
+        settings["enforce"] = False
+        directory = args.directory.resolve()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if directory.stat().st_uid != os.getuid() or directory.stat().st_mode & 0o077:
+            parser.error("User observation requires a private directory owned by the current user")
+        response_dir = directory / "response"
+        response_dir.mkdir(mode=0o700, exist_ok=True)
+        if args.command == "observe":
+            from .sensors import fingerprint
+
+            baseline = directory / "baseline.json"
+            if not baseline.exists():
+                records = {}
+                for path in settings["integrity_paths"]:
+                    try:
+                        records[path] = fingerprint(path)
+                    except (OSError, ValueError):
+                        logging.warning("Unable to record initial fingerprint for %s", path)
+                write_json(baseline, {"files": records})
+            serve(settings, directory, directory, baseline=baseline, response_runtime=response_dir)
+        else:
+            from .responder import loop
+
+            loop(settings, user_directory=directory)
         return
     if os.geteuid() != 0:
         parser.error("This operation requires root")

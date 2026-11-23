@@ -8,7 +8,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from . import analysis, store
+from . import analysis, notifications, schedule, store
 
 STATIC = Path(__file__).with_name("static")
 ASSETS = {
@@ -52,18 +52,49 @@ class Console(socketserver.ThreadingMixIn, HTTPServer):
         finally:
             self.slots.release()
 
-    def assess(self):
+    def start_workers(self):
+        email = None if self.monitor.demo else self.monitor.settings.get("email_alerts")
+        with store.connect(self.monitor.database) as db:
+            db.execute("BEGIN IMMEDIATE")
+            notifications.prepare(db, email)
+        self.monitor.start()
+        threading.Thread(target=self.run_scheduler, name="check-scheduler", daemon=True).start()
+        if email:
+            threading.Thread(target=self.run_email_delivery, args=(email,), name="alert-email", daemon=True).start()
+
+    def run_scheduler(self):
+        while not self.monitor.stop.wait(2):
+            if not self.monitor.ready.is_set():
+                continue
+            try:
+                with store.connect(self.monitor.database) as db:
+                    occurrence = schedule.read(db)
+                if occurrence["next_at"] is not None and occurrence["next_at"] <= time.time():
+                    self.assess(occurrence)
+            except Exception:
+                logging.exception("Checking the recurring assessment schedule failed")
+
+    def run_email_delivery(self, email):
+        while not self.monitor.stop.wait(10):
+            try:
+                notifications.deliver(self.monitor.database, email, time.time())
+            except Exception:
+                logging.error("Email alert worker failed")
+
+    def assess(self, occurrence=None):
         with self.assessment_lock:
             if self.assessing or (self.assessment_at and time.monotonic() - self.assessment_at < 15):
                 return False
             self.assessing = True
             self.assessment_at = time.monotonic()
-        threading.Thread(target=self.run_assessment, daemon=True, name="active-check").start()
+        threading.Thread(target=self.run_assessment, args=(occurrence,), daemon=True, name="active-check").start()
         return True
 
-    def run_assessment(self):
+    def run_assessment(self, occurrence=None):
         now = time.time()
         model = self.monitor.settings["ollama_model"]
+        trigger = "scheduled" if occurrence else "manual"
+        event_label = "Scheduled" if occurrence else "Active"
         try:
             with self.monitor.lock:
                 result = self.monitor.scan(active=True)
@@ -84,17 +115,23 @@ class Console(socketserver.ThreadingMixIn, HTTPServer):
                     result["model"] = "Local model + statistical baseline"
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, http.client.HTTPException):
                     result["model"] = "Statistical baseline · local model unavailable"
-            result["at"] = time.time()
+            result.update(at=time.time(), trigger=trigger)
             with store.connect(self.monitor.database) as db:
+                db.execute("BEGIN IMMEDIATE")
                 store.property_set(db, "assessment", result)
-                store.event(db, result["at"], "info", "assessment", "Active AI check completed", result["summary"])
+                store.event(db, result["at"], "info", "assessment", f"{event_label} AI check completed", result["summary"])
+                schedule.advance(db, occurrence, result["at"])
         except Exception as error:
             logging.exception("Active check failed")
             with store.connect(self.monitor.database) as db:
+                db.execute("BEGIN IMMEDIATE")
+                failed_at = time.time()
                 store.property_set(db, "assessment", {
-                    "at": time.time(), "error": type(error).__name__, "summary": "Active check failed.",
+                    "at": failed_at, "trigger": trigger, "error": type(error).__name__,
+                    "summary": f"{event_label} check failed.",
                 })
-                store.event(db, time.time(), "medium", "assessment", "Active AI check failed", type(error).__name__)
+                store.event(db, failed_at, "medium", "assessment", f"{event_label} AI check failed", type(error).__name__)
+                schedule.advance(db, occurrence, failed_at)
         finally:
             with self.assessment_lock:
                 self.assessing = False
@@ -150,6 +187,8 @@ class Handler(BaseHTTPRequestHandler):
             with store.connect(monitor.database) as db:
                 db.execute("BEGIN")
                 data = store.snapshot(db, now)
+                data["schedule"] = schedule.read(db)
+                data["email"] = notifications.status(db)
             data.update({
                 "now": now, "ready": monitor.ready.is_set(), "response": monitor.response(),
                 "assessing": self.server.assessing, "interval": monitor.settings["interval"],
@@ -171,3 +210,30 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(202, {"status": "running"})
         else:
             self.reply(429, {"error": "A check is running or was started recently"})
+
+    def do_PUT(self):
+        if not self.authorized(mutation=True):
+            return
+        if self.path != "/api/schedule":
+            self.reply(404, {"error": "Not found"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 128 or self.headers.get("Transfer-Encoding"):
+                raise ValueError
+            if self.headers.get_content_type() != "application/json":
+                raise ValueError
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict) or set(payload) != {"interval_minutes"}:
+                raise ValueError
+        except (ValueError, OSError, RecursionError):
+            self.reply(400, {"error": "Expected a schedule with an interval in minutes."})
+            return
+        try:
+            with store.connect(self.server.monitor.database) as db:
+                db.execute("BEGIN IMMEDIATE")
+                saved = schedule.save(db, payload["interval_minutes"], time.time())
+        except ValueError as error:
+            self.reply(400, {"error": str(error)})
+        else:
+            self.reply(200, saved)

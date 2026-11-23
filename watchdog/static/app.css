@@ -79,3 +79,13 @@ dd{margin:0;text-transform:capitalize}
 .unlock input{width:100%;margin-bottom:15px}
 @media(max-width:1050px){body{grid-template-columns:180px minmax(0,1fr)}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-grid{grid-template-columns:1fr}.assessment small{margin-top:0}}
 @media(max-width:650px){body{display:block}.sidebar{height:auto;position:static;padding:12px 15px;gap:10px;border-right:0;border-bottom:1px solid var(--border)}nav{display:flex;justify-content:space-between;gap:1px}nav a{padding:7px 8px;gap:4px;font-size:.84rem}nav a span{width:auto}.sidebar-footer{padding-top:7px}main{padding:21px 14px}.toolbar{margin-bottom:17px;gap:6px}.toolbar button{padding:8px;font-size:.83rem}.metric{padding:12px}.metrics,.page{gap:10px}.panel-head{padding:14px}.events li:not(.empty){gap:7px}.legend{gap:6px}}
+.settings-form{padding:0 18px 18px}
+.settings-form label{display:block;margin-bottom:5px;color:var(--subtle);font-size:.9rem}
+.settings-action{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.settings-action input{width:10ch}
+.settings-form p,.settings-note{margin-top:8px;color:var(--subtle);font-size:.85rem}
+.settings-form .settings-feedback{color:var(--accent)}
+.settings-form .settings-feedback.bad-text{color:var(--danger)}
+.settings-note{padding:0 18px 16px}
+#email-status dd{text-transform:none;text-align:right}
+@media(max-width:650px){nav{flex-wrap:wrap;justify-content:flex-start;gap:4px}nav a{padding-inline:6px}nav a span{display:none}}

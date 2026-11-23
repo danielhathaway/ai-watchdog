@@ -100,6 +100,27 @@ class WatchdogTests(unittest.TestCase):
                 self.assertEqual(enforcement, firewall.called)
                 self.assertEqual(enforcement, bring_down.called)
 
+    def test_user_supervisor_never_enforces_even_if_configuration_requests_it(self):
+        settings = {**self.config, "enforce": True}
+        response_dir = self.directory / "response"
+        response_dir.mkdir()
+        request = {"isolate": True, "blocks": {"8.8.8.8": 500}}
+        with (
+            patch.object(responder, "uptime", side_effect=[10, 11, 12]),
+            patch.object(responder, "heartbeat", return_value=request),
+            patch.object(responder, "dashboard_alive", return_value=True),
+            patch.object(responder, "notify"),
+            patch.object(responder, "apply_firewall") as firewall,
+            patch.object(responder, "isolate_links") as change_links,
+            patch.object(responder.time, "sleep", side_effect=InterruptedError),
+        ):
+            with self.assertLogs(level="CRITICAL"), self.assertRaises(InterruptedError):
+                responder.loop(settings, user_directory=self.directory)
+        status = json.loads((response_dir / "status.json").read_text())
+        self.assertEqual(("observe", "would-isolate"), (status["mode"], status["status"]))
+        firewall.assert_not_called()
+        change_links.assert_not_called()
+
     def test_unmitigated_abuse_triggers_link_containment_after_three_failures(self):
         settings = {**self.config, "enforce": True}
         request = {"isolate": False, "blocks": {"8.8.8.8": 500}}

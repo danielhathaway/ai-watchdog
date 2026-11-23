@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE TABLE IF NOT EXISTS properties (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS failures (cursor TEXT PRIMARY KEY, address TEXT NOT NULL, at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS failure_time ON failures(at);
+CREATE TABLE IF NOT EXISTS email_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, severity TEXT NOT NULL, title TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS email_outbox_time ON email_outbox(at);
 """
 
 
@@ -57,6 +61,12 @@ def event(db, at, severity, kind, title, detail="", subject="", cooldown=0):
         "INSERT INTO events(at,severity,kind,title,detail,subject) VALUES (?,?,?,?,?,?)",
         (at, severity, kind, title, detail, subject),
     )
+
+
+    if severity in ("critical", "high"):
+        destination = property_get(db, "email_destination")
+        if destination and (severity == "critical" or destination["minimum_severity"] == "high"):
+            db.execute("INSERT INTO email_outbox(at,severity,title) VALUES (?,?,?)", (at, severity, title))
 
 
 def expire(db, now, days):

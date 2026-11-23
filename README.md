@@ -12,6 +12,23 @@ python3 -m watchdog demo
 
 Open [127.0.0.1:8765](http://127.0.0.1:8765). The demo uses synthetic data in a temporary database. **Run AI check** refreshes the assessment and records it in Activity. Devices shows remembered neighbors. Sensors shows source availability and current firewall blocks.
 
+## Install for your Linux user account
+
+Use this option for live observation without administrator access. It requires an active systemd user manager and uses sensors available to the logged-in account.
+
+```sh
+./deploy/install-user.sh
+cat .watchdog/token
+```
+
+Open [127.0.0.1:8765](http://127.0.0.1:8765) and enter the token. The installer enables the monitor and a separate heartbeat supervisor in the user service manager. Both run as your account. This installation always runs in observe-only mode and records events and local configuration in the checkout's private `.watchdog` directory. Keep the checkout at its installed path. The initial integrity baseline reflects the local files at first start.
+
+```sh
+systemctl --user status ai-watchdog-observe.service ai-watchdog-observe-supervisor.service
+```
+
+Use the system-wide installation below for enforcement or monitoring independently of the user session.
+
 ## Install on a Linux host
 
 Use a Linux host with systemd, journald, iproute2, nftables with `destroy table` and timed set-element support, and a local management console. The installer copies the service code and configuration with root ownership. It does not start the services. Review the configuration in `/etc/ai-watchdog/config.json` before starting.
@@ -39,6 +56,39 @@ The response service starts the monitor. Open [127.0.0.1:8765](http://127.0.0.1:
 The statistical detector learns a robust baseline for traffic and established TCP connections from up to 720 recent normal samples per metric. It needs 30 valid samples per metric to begin reporting deviations. An active check refreshes local evidence immediately, evaluates it against that history, and records a summary. Traffic inspection covers rates and connection metadata. Device observations cover entries visible in the local cache and do not establish a device's identity or presence independently.
 
 For an optional natural-language summary, configure a downloaded local Ollama model in `ollama_model`. Run Ollama in local-only mode at `127.0.0.1:11434` with cloud features disabled. Restart the monitor after editing the model setting. The optional model sees numeric evidence, coverage, and event category counts. The statistical assessment continues if the model is unavailable. The model output has no command or rule execution privileges. [Ollama local-only configuration](https://github.com/ollama/ollama/blob/main/docs/faq.mdx)
+
+### Recurring AI checks
+
+Open **Settings → Recurring AI check** and enter a cadence in minutes. The first check is due one interval after saving. Use 0 to turn the schedule off. The service saves the schedule across restarts and performs one catch-up check after downtime, then resumes the saved cadence. The dashboard may be closed. Scheduled checks use the same local analysis and run one at a time with manual checks. Their results appear in Overview and Activity.
+
+### Email alerts
+
+Add an `email_alerts` object to the active configuration file. For the user installation this is `.watchdog/config.json`. For the system installation it is `/etc/ai-watchdog/config.json`. The default value `null` keeps delivery off.
+
+```json
+"email_alerts": {
+  "host": "smtp.example.com",
+  "port": 587,
+  "security": "starttls",
+  "sender": "watchdog@example.com",
+  "recipient": "security@example.com",
+  "minimum_severity": "high",
+  "username": "watchdog@example.com",
+  "password_file": "smtp-password"
+}
+```
+
+Use the host, port, sender, and authentication settings from your relay. Use `"tls"` for implicit TLS. Keep the SMTP password or app password in a separate file. The path may be absolute or relative to the configuration directory. Use mode `0600` for a user installation or mode `0640` with ownership `root:ai-watchdog` for the system installation. Omit both authentication fields for a trusted relay that accepts unauthenticated submissions over TLS. [Python SMTP documentation](https://docs.python.org/3/library/smtplib.html)
+
+Restart the monitor after changing the configuration:
+
+```sh
+systemctl --user restart ai-watchdog-observe.service
+```
+
+For a system-wide installation, restart `ai-watchdog.service` and use a local TLS relay allowed by the service's loopback network policy. Check relay connectivity and delivery while in observe mode before relying on alerts.
+
+New high and critical events enter a local queue. Set `minimum_severity` to `critical` for critical-only alerts. Each email includes event titles, severity, and timestamps. IP addresses, device identities, file paths, and raw logs stay in Watchdog. Delivery is batched, retried on failure, and expires after 24 hours. The Settings page shows pending alerts, the next retry, and the last time SMTP accepted a batch. If the computer is disconnected, alerts can only be delivered once the relay becomes reachable again.
 
 ### Enable and verify containment
 

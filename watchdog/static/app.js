@@ -8,21 +8,26 @@ const date = (stamp) => new Date(stamp * 1000);
 const time = (stamp) => date(stamp).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
 const fullDate = (stamp) => date(stamp).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
 const number = new Intl.NumberFormat();
-const pages = {overview: "Overview", activity: "Activity", devices: "Devices", sensors: "Sensors"};
+const pages = {overview: "Overview", activity: "Activity", devices: "Devices", sensors: "Sensors", settings: "Settings"};
 let token = sessionStorage.getItem("watchdog-token") || "";
 let snapshot = null;
 let pending = false;
 let generation = 0;
 let accessFailed = false;
+let scheduleEdited = false;
 
 function announce(message) {
   get("error").hidden = !message;
   text("error", message || "");
 }
 
-async function api(path, method = "GET") {
+async function api(path, method = "GET", payload) {
   const headers = token ? {Authorization: "Bearer " + token} : {};
-  const response = await fetch(path, {method, headers, cache: "no-store", signal: AbortSignal.timeout(5000)});
+  if (payload !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(path, {
+    method, headers, body: payload === undefined ? undefined : JSON.stringify(payload),
+    cache: "no-store", signal: AbortSignal.timeout(5000)
+  });
   if (response.status === 401) {
     const error = new Error("Access token required");
     error.unauthorized = true;
@@ -188,7 +193,9 @@ function render() {
   text("assessment-title", assessing ? "Checking this host" : assessment?.error ? "Check failed" : assessment ? "Check complete" : "Ready to run");
   text("assessment-description", assessing ? "Reviewing local evidence and recent activity."
     : assessment?.summary || "Run an AI check for a fresh assessment of this host.");
-  text("assessment-at", assessment ? fullDate(assessment.at) : "");
+  text("assessment-at", assessment
+    ? `${assessment.trigger === "scheduled" ? "Scheduled check · " : ""}${fullDate(assessment.at)}`
+    : "");
   get("run").disabled = !active || assessing || pending;
   eventList("recent-events", snapshot.events.slice(0, 5));
   filterEvents();
@@ -213,11 +220,41 @@ function render() {
       return item;
     })
     : [element("li", "No active blocks.", "empty")]));
+  renderSettings();
   drawTraffic();
+}
+
+function renderSettings() {
+  const {schedule, email} = snapshot;
+  if (!scheduleEdited) get("schedule-minutes").value = schedule.interval_minutes;
+  text("next-check", schedule.next_at
+    ? `Every ${number.format(schedule.interval_minutes)} min · Next ${fullDate(schedule.next_at)}`
+    : "Off");
+  const values = email.enabled ? [
+    ["Delivery", email.retry_at ? "Retrying" : "Enabled"],
+    ["Severity", email.minimum_severity === "critical" ? "Critical only" : "High and critical"],
+    ["Pending alerts", number.format(email.pending)],
+    ["Last accepted by SMTP", email.last_sent_at ? fullDate(email.last_sent_at) : "None yet"],
+  ] : [["Delivery", "Off"]];
+  if (email.retry_at) values.push(["Next retry", fullDate(email.retry_at)]);
+  get("email-status").replaceChildren(...values.map(([name, value]) => {
+    const row = element("div");
+    row.append(element("dt", name), element("dd", value));
+    return row;
+  }));
+  get("email-help").hidden = email.enabled;
+}
+
+function feedback(message, failed = false) {
+  text("schedule-feedback", message);
+  get("schedule-feedback").classList.toggle("bad-text", failed);
+  get("schedule-feedback").hidden = !message;
 }
 
 function lock(showError = false) {
   generation++;
+  scheduleEdited = false;
+  feedback("");
   token = "";
   snapshot = null;
   sessionStorage.removeItem("watchdog-token");
@@ -278,6 +315,32 @@ get("run").addEventListener("click", async () => {
   } finally {
     pending = false;
     await refresh();
+  }
+});
+get("schedule-minutes").addEventListener("input", () => {
+  scheduleEdited = true;
+  feedback("");
+});
+get("schedule-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const before = generation;
+  const input = get("schedule-minutes");
+  const button = event.submitter;
+  button.disabled = true;
+  input.disabled = true;
+  try {
+    const saved = await api("/api/schedule", "PUT", {interval_minutes: input.valueAsNumber});
+    if (before !== generation) return;
+    scheduleEdited = false;
+    snapshot.schedule = saved;
+    renderSettings();
+    feedback(saved.interval_minutes ? "Schedule saved." : "Recurring checks turned off.");
+    await refresh();
+  } catch (error) {
+    if (before === generation) feedback(error.message, true);
+  } finally {
+    button.disabled = false;
+    input.disabled = false;
   }
 });
 get("severity").addEventListener("change", filterEvents);

@@ -9,5 +9,6 @@
   "integrity_paths": ["/etc/passwd", "/etc/group", "/etc/ld.so.preload"],
   "isolate_on_integrity": [],
   "ollama_model": "",
-  "retention_days": 30
+  "retention_days": 30,
+  "email_alerts": null
 }

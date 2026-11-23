@@ -16,6 +16,7 @@
       <a href="#activity" data-page="activity"><span aria-hidden="true">≋</span>Activity</a>
       <a href="#devices" data-page="devices"><span aria-hidden="true">◇</span>Devices</a>
       <a href="#sensors" data-page="sensors"><span aria-hidden="true">◉</span>Sensors</a>
+      <a href="#settings" data-page="settings"><span aria-hidden="true">⚙</span>Settings</a>
     </nav>
     <div class="sidebar-footer">
       <span id="mode-dot" class="dot"></span><span id="mode">Connecting</span>
@@ -87,6 +88,25 @@
           <div class="panel-head"><h2>Firewall blocks</h2></div>
           <ul id="blocks" class="events"></ul>
         </div>
+      </section>
+      <section id="settings" class="page" hidden>
+        <section class="panel">
+          <div class="panel-head"><div><h2>Recurring AI check</h2><p id="next-check">Off</p></div></div>
+          <form id="schedule-form" class="settings-form">
+            <label for="schedule-minutes">Minutes between checks</label>
+            <div class="settings-action">
+              <input id="schedule-minutes" type="number" min="0" max="10080" step="1" value="0" required aria-describedby="schedule-hint">
+              <button type="submit">Save schedule</button>
+            </div>
+            <p id="schedule-hint">Use 5–10,080 minutes, or enter 0 to turn recurring checks off.</p>
+            <p id="schedule-feedback" class="settings-feedback" role="status" hidden></p>
+          </form>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Email alerts</h2></div>
+          <dl id="email-status"></dl>
+          <p id="email-help" class="settings-note">Set up an SMTP server and recipient in the Watchdog configuration file to enable delivery.</p>
+        </section>
       </section>
     </div>
   </main>

@@ -11,12 +11,13 @@ SENSOR_ERRORS = (OSError, ValueError, KeyError, subprocess.SubprocessError)
 
 
 class Monitor:
-    def __init__(self, settings, database, runtime, demo=False, baseline=BASELINE):
+    def __init__(self, settings, database, runtime, demo=False, baseline=BASELINE, response_runtime=None):
         self.settings = settings
         self.database = database
         self.runtime = runtime
         self.demo = demo
         self.baseline = baseline
+        self.response_runtime = response_runtime or RESPONSE_RUNTIME
         self.previous = {}
         self.previous_at = 0
         self.integrity_seen = {}
@@ -52,7 +53,7 @@ class Monitor:
             return {"mode": "demo", "status": "observing", "isolated": False, "blocked": [],
                     "reason": "", "watchdog_alive": True}
         try:
-            state = json.loads((RESPONSE_RUNTIME / "status.json").read_text())
+            state = json.loads((self.response_runtime / "status.json").read_text())
             state["watchdog_alive"] = state["boot_id"] == BOOT_ID and 0 <= uptime() - state["at"] < 20
             return state
         except (OSError, ValueError, KeyError):
