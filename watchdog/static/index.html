@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AI Watchdog</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="#overview"><span class="brand-icon" aria-hidden="true">⌁</span>AI Watchdog</a>
+    <nav aria-label="Dashboard">
+      <a href="#overview" data-page="overview" aria-current="page"><span aria-hidden="true">◫</span>Overview</a>
+      <a href="#activity" data-page="activity"><span aria-hidden="true">≋</span>Activity</a>
+      <a href="#devices" data-page="devices"><span aria-hidden="true">◇</span>Devices</a>
+      <a href="#sensors" data-page="sensors"><span aria-hidden="true">◉</span>Sensors</a>
+    </nav>
+    <div class="sidebar-footer">
+      <span id="mode-dot" class="dot"></span><span id="mode">Connecting</span>
+      <button id="lock" type="button" class="text-button" hidden>Lock</button>
+    </div>
+  </aside>
+  <main>
+    <header class="toolbar">
+      <div>
+        <h1 id="page-name">Overview</h1>
+        <p class="subheading" id="last-updated" aria-live="off">Connecting to the local monitor</p>
+      </div>
+      <button id="run" type="button" disabled><span aria-hidden="true">✧</span> Run AI check</button>
+    </header>
+    <p id="error" class="notice" role="status" hidden></p>
+    <form id="unlock" class="panel unlock" hidden>
+      <h2>Unlock dashboard</h2>
+      <p>Enter the access token from the local Watchdog service.</p>
+      <label for="token">Access token</label>
+      <input id="token" type="password" required autocomplete="off" spellcheck="false">
+      <button type="submit">Unlock</button>
+    </form>
+    <div id="dashboard" hidden>
+      <section id="overview" class="page">
+        <div class="metrics">
+          <article class="panel metric"><p><span aria-hidden="true">◉</span> Monitoring</p><strong id="monitoring">—</strong><small id="monitoring-detail">Waiting for sensors</small></article>
+          <article class="panel metric"><p><span aria-hidden="true">◈</span> Containment</p><strong id="containment">—</strong><small id="containment-detail">Watchdog status</small></article>
+          <article class="panel metric"><p><span aria-hidden="true">△</span> High severity</p><strong id="alerts">—</strong><small>Last 24 hours</small></article>
+          <article class="panel metric"><p><span aria-hidden="true">◇</span> Known devices</p><strong id="device-count">—</strong><small>Local neighbors</small></article>
+        </div>
+        <div class="overview-grid">
+          <section class="panel chart-panel">
+            <div class="panel-head"><div><h2>Network traffic</h2><p>Last hour · bytes per second</p></div>
+              <div class="legend"><span><i></i>Inbound</span><span><i></i>Outbound</span></div>
+            </div>
+            <canvas id="traffic-chart" aria-label="Inbound and outbound network traffic over the last hour" role="img"></canvas>
+            <p id="traffic-detail" class="chart-detail"></p>
+          </section>
+          <section class="panel assessment">
+            <div class="panel-head"><div><h2>AI assessment</h2><p id="assessment-model">Statistical baseline</p></div><span class="assessment-icon" aria-hidden="true">✧</span></div>
+            <div class="assessment-body" aria-live="polite"><strong id="assessment-title">Ready to run</strong><p id="assessment-description">Run an AI check for a fresh assessment of this host.</p></div>
+            <small id="assessment-at"></small>
+          </section>
+        </div>
+        <section class="panel">
+          <div class="panel-head"><h2>Recent activity</h2><a class="text-button" href="#activity">View activity</a></div>
+          <ul class="events" id="recent-events"></ul>
+        </section>
+      </section>
+      <section id="activity" class="page" hidden>
+        <div class="panel">
+          <div class="panel-head"><h2>Event log</h2><label>Severity <select id="severity"><option value="all">All events</option><option value="high">High and critical</option><option value="medium">Medium</option><option value="info">Info</option></select></label></div>
+          <ul class="events" id="all-events"></ul>
+        </div>
+      </section>
+      <section id="devices" class="page" hidden>
+        <div class="panel">
+          <div class="panel-head"><div><h2>Known neighbors</h2><p>Devices learned from the kernel neighbor cache</p></div></div>
+          <div class="table-wrap"><table><thead><tr><th>Last known address</th><th>Hardware address</th><th>Interface</th><th>First seen</th><th>Last seen</th></tr></thead><tbody id="device-rows"></tbody></table></div>
+          <p id="no-devices" class="empty" hidden>No neighbors have been observed yet.</p>
+        </div>
+      </section>
+      <section id="sensors" class="page" hidden>
+        <div class="panel">
+          <div class="panel-head"><h2>Sensor health</h2></div>
+          <dl id="sensor-rows"></dl>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Firewall blocks</h2></div>
+          <ul id="blocks" class="events"></ul>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

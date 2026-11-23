@@ -1,0 +1,13 @@
+{
+  "port": 8765,
+  "interval": 10,
+  "heartbeat_timeout": 45,
+  "startup_grace": 90,
+  "enforce": false,
+  "protected_networks": [],
+  "blocked_macs": [],
+  "integrity_paths": ["/etc/passwd", "/etc/group", "/etc/ld.so.preload"],
+  "isolate_on_integrity": [],
+  "ollama_model": "",
+  "retention_days": 30
+}

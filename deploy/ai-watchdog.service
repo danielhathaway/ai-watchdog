@@ -1,0 +1,36 @@
+[Unit]
+Description=AI Watchdog endpoint monitor and local console
+
+[Service]
+Type=simple
+User=ai-watchdog
+Group=ai-watchdog
+SupplementaryGroups=systemd-journal
+WorkingDirectory=/opt/ai-watchdog
+ExecStart=/usr/bin/python3 -B -m watchdog serve
+Restart=always
+RestartSec=2s
+RuntimeDirectory=ai-watchdog
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+StateDirectory=ai-watchdog
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+IPAddressDeny=any
+IPAddressAllow=localhost
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
