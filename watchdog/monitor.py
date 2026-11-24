@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 
-from . import analysis, sensors, store
+from . import analysis, process_traffic, sensors, store, udp_traffic
 from .common import BASELINE, BOOT_ID, RESPONSE_RUNTIME, blockable, uptime, write_json
 
 SENSOR_ERRORS = (OSError, ValueError, KeyError, subprocess.SubprocessError)
@@ -20,6 +20,8 @@ class Monitor:
         self.response_runtime = response_runtime or RESPONSE_RUNTIME
         self.previous = {}
         self.previous_at = 0
+        self.previous_sockets = None
+        self.previous_socket_at = 0
         self.integrity_seen = {}
         self.lock = threading.Lock()
         self.ready = threading.Event()
@@ -82,14 +84,36 @@ class Monitor:
                 status[name] = "ready"
                 return value
 
-            counters, rx, tx = read(
+            counters, rx, tx, interface_snapshot = read(
                 "Traffic", lambda: sensors.traffic(self.previous, at, self.previous_at, self.settings["interval"]),
-                ({}, None, None),
+                ({}, None, None, {"method": "unavailable", "uplinks": [], "interfaces": []}),
+            )
+            baseline = store.property_get(db, "traffic_baseline", {})
+            if interface_snapshot["uplinks"]:
+                basis = {key: interface_snapshot[key] for key in ("method", "uplinks")}
+                if baseline.get("basis") != basis:
+                    baseline = {"basis": basis, "since": now}
+                    store.property_set(db, "traffic_baseline", baseline)
+            elif status["Traffic"] == "ready":
+                status["Traffic"] = "degraded"
+            store.property_set(db, "interface_traffic", {
+                **interface_snapshot, "at": now, "rx": rx, "tx": tx, "baseline_since": baseline.get("since"),
+            })
+            socket_at = uptime()
+            socket_readings = read("TCP process attribution", process_traffic.capture, None)
+            try:
+                udp = udp_traffic.read_snapshot()
+            except SENSOR_ERRORS + (TypeError, RecursionError):
+                udp = {"state": "unavailable"}
+            if udp["state"] != "off":
+                status["UDP process attribution"] = "ready" if udp["state"] == "ready" else "degraded"
+            attribution = process_traffic.summarize(
+                self.previous_sockets, socket_readings, socket_at - self.previous_socket_at, self.settings["interval"], udp,
             )
             connections, outbound, inbound = read("TCP connections", sensors.sockets, (None, 0, 0))
             devices = read("Neighbor discovery", sensors.neighbors, [])
-            for mac, address, interface in devices[:500]:
-                self.remember(db, now, mac, address, interface)
+            for mac, address, device_interface in devices[:500]:
+                self.remember(db, now, mac, address, device_interface)
             cursor = store.property_get(db, "journal_cursor")
             failures, cursor, gap = read("SSH journal", lambda: sensors.ssh_failures(cursor, now), ([], cursor, False))
             if gap:
@@ -124,16 +148,30 @@ class Monitor:
             history = {
                 metric: [row[0] for row in db.execute(
                     f"SELECT {metric} FROM samples WHERE training=1 AND {metric} IS NOT NULL AND at>=? "
-                    "ORDER BY id DESC LIMIT 720", (now - 86400,),
+                    "ORDER BY id DESC LIMIT 720", (
+                        max(now - 86400, baseline.get("since", 0)) if metric in {"rx", "tx"} else now - 86400,
+                    ),
                 )]
                 for metric in analysis.FLOORS
             }
             deviations = analysis.deviations(metrics, history)
+            traffic_spikes = [item for item in deviations if item["metric"] in {"rx", "tx"}]
+            if traffic_spikes:
+                # Preserve every flagged traffic sample even when Activity alerts are deduplicated.
+                db.execute("INSERT INTO interface_spikes(at,snapshot) VALUES (?,?)", (now, json.dumps({
+                    **interface_snapshot, "rx": rx, "tx": tx, "deviations": traffic_spikes,
+                })))
             for item in deviations:
                 metric = item["metric"]
-                store.event(db, now, "medium", "anomaly", "Activity exceeded its local baseline",
+                event_id = store.event(db, now, "medium", "anomaly", "Activity exceeded its local baseline",
                             f'{item["observed"]:,} observed vs {item["threshold"]:,} threshold'
                             + (" B/s" if metric in {"rx", "tx"} else " connections"), metric, cooldown=300)
+                if event_id and metric in {"rx", "tx"}:
+                    snapshot = {"state": attribution["state"], "direction": metric, "protocols": attribution["protocols"]}
+                    if attribution["state"] == "ready":
+                        snapshot.update(processes=attribution[metric], unattributed=attribution["unattributed"][metric])
+                    db.execute("INSERT INTO traffic_attribution VALUES (?,?,?)",
+                               (event_id, now, json.dumps(snapshot)))
             if outbound >= 25 or inbound >= 25:
                 risk = max(risk, 55)
                 store.event(db, now, "medium", "connections", "Unusual TCP handshake activity",
@@ -162,6 +200,10 @@ class Monitor:
                 risk = max(risk, 95)
 
             self.previous, self.previous_at = counters, at
+            self.previous_sockets, self.previous_socket_at = socket_readings, socket_at
+            store.property_set(db, "process_traffic", {
+                "at": now, **{key: value for key, value in attribution.items() if key not in {"rx", "tx"}},
+            })
             if not active:
                 training = int(risk < 45 and not deviations and response["status"] == "observing")
                 db.execute("INSERT INTO samples(at,rx,tx,connections,failures,risk,training) VALUES (?,?,?,?,?,?,?)",

@@ -49,11 +49,15 @@
         </div>
         <div class="overview-grid">
           <section class="panel chart-panel">
-            <div class="panel-head"><div><h2>Network traffic</h2><p>Last hour · bytes per second</p></div>
+            <div class="panel-head"><div><h2>Network traffic</h2><p id="traffic-scope">Last hour · bytes per second</p></div>
               <div class="legend"><span><i></i>Inbound</span><span><i></i>Outbound</span></div>
             </div>
             <canvas id="traffic-chart" aria-label="Inbound and outbound network traffic over the last hour" role="img"></canvas>
             <p id="traffic-detail" class="chart-detail"></p>
+            <details id="live-interfaces" class="interface-detail" hidden>
+              <summary>Interface breakdown</summary>
+              <div id="live-interface-table"></div>
+            </details>
           </section>
           <section class="panel assessment">
             <div class="panel-head"><div><h2>AI assessment</h2><p id="assessment-model">Statistical baseline</p></div><span class="assessment-icon" aria-hidden="true">✧</span></div>
@@ -62,11 +66,21 @@
           </section>
         </div>
         <section class="panel">
+          <div class="panel-head"><div><h2>Process traffic</h2><p id="process-timestamp">Latest sample</p></div><span id="process-scope" class="process-scope">TCP</span></div>
+          <div id="process-table" class="table-wrap" hidden><table><thead><tr><th>Process</th><th>PID</th><th>TCP in</th><th>TCP out</th><th>UDP in</th><th>UDP out</th></tr></thead><tbody id="process-rows"></tbody></table></div>
+          <p id="process-empty" class="empty"></p>
+          <p id="process-unknown" class="process-note" hidden></p>
+        </section>
+        <section class="panel">
           <div class="panel-head"><h2>Recent activity</h2><a class="text-button" href="#activity">View activity</a></div>
           <ul class="events" id="recent-events"></ul>
         </section>
       </section>
       <section id="activity" class="page" hidden>
+        <section class="panel">
+          <div class="panel-head"><h2>Traffic spikes by interface</h2></div>
+          <div id="interface-spikes"></div>
+        </section>
         <div class="panel">
           <div class="panel-head"><h2>Event log</h2><label>Severity <select id="severity"><option value="all">All events</option><option value="high">High and critical</option><option value="medium">Medium</option><option value="info">Info</option></select></label></div>
           <ul class="events" id="all-events"></ul>

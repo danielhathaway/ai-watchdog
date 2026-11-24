@@ -139,7 +139,131 @@ function element(tag, content, className) {
   return node;
 }
 
+function interfaceTable(interfaces) {
+  const wrapper = element("div", null, "table-wrap");
+  const table = element("table");
+  const heading = element("tr");
+  for (const label of ["Interface", "In total", "Inbound", "Outbound"]) {
+    const column = element("th", label);
+    column.scope = "col";
+    heading.append(column);
+  }
+  const head = element("thead");
+  head.append(heading);
+  const body = element("tbody");
+  const ordered = interfaces.toSorted((a, b) => Number(b.counted) - Number(a.counted));
+  for (const {name, counted, rx, tx} of ordered) {
+    const row = element("tr");
+    for (const cell of [name, counted ? "Yes" : "No", formatRate(rx), formatRate(tx)]) {
+      row.append(element("td", cell));
+    }
+    body.append(row);
+  }
+  table.append(head, body);
+  wrapper.append(table);
+  return wrapper;
+}
+
+function renderInterfaces(current, spikes = []) {
+  const labels = {physical: "Physical uplinks", default: "Default-route interface", single: "Single interface"};
+  const scope = current ? labels[current.method] || "Uplink unavailable" : null;
+  text("traffic-scope", scope ? `Last hour · ${scope}` : "Last hour · bytes per second");
+  get("live-interfaces").hidden = !current?.interfaces.length;
+  if (current?.interfaces.length && get("live-interface-table").dataset.sample !== String(current.at)) {
+    get("live-interface-table").dataset.sample = current.at;
+    get("live-interface-table").replaceChildren(interfaceTable(current.interfaces));
+  }
+
+  const container = get("interface-spikes");
+  const key = spikes.map(({id, at}) => `${id}:${at}`).join(",");
+  if (container.dataset.spikes === key) return;
+  container.dataset.spikes = key;
+  const opened = new Set(Array.from(container.querySelectorAll("details[open]"), (item) => item.dataset.spike));
+  const entries = spikes.map((spike) => {
+    const detail = element("details", null, "interface-detail");
+    detail.dataset.spike = spike.id;
+    detail.open = opened.has(String(spike.id));
+    const rates = spike.deviations.map(({metric, observed}) =>
+      `${metric === "rx" ? "Inbound" : "Outbound"} ${formatRate(observed)}`);
+    const stamp = date(spike.at).toLocaleString([], {
+      month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit"
+    });
+    detail.append(element("summary", `${stamp} · ${rates.join(" · ")}`));
+    if (spike.window_seconds) {
+      detail.append(element("p", `${number.format(spike.window_seconds)} s sample`, "interface-window"));
+    }
+    detail.append(interfaceTable(spike.interfaces));
+    return detail;
+  });
+  container.replaceChildren(...(entries.length ? entries : [element("p", "No interface breakdowns recorded yet.", "empty")]));
+}
+
+function spikeAttribution(record, open) {
+  const details = element("details", null, "spike-details");
+  details.dataset.event = record.id;
+  details.open = open;
+  const direction = record.subject === "rx" ? "inbound" : "outbound";
+  const attribution = record.attribution;
+  const hasUDP = attribution?.protocols?.udp === "ready";
+  details.append(element("summary", `Processes with ${direction} ${hasUDP ? "TCP / UDP" : "TCP"} traffic`));
+  if (attribution?.state !== "ready") {
+    details.append(element("p", "No process sample is available for this event."));
+    return details;
+  }
+  const metric = record.subject;
+  const rows = attribution.processes.map((process) => {
+    const rates = hasUDP
+      ? [process[`tcp_${metric}`] == null ? null : `TCP ${formatRate(process[`tcp_${metric}`])}`,
+        `UDP ${formatRate(process[`udp_${metric}`])}`].filter(Boolean).join(" · ")
+      : formatRate(process[metric]);
+    return element("li", `${process.name} (PID ${process.pid}) · ${rates}`);
+  });
+  if (attribution.unattributed > 0) {
+    rows.push(element("li", `TCP without a visible owner · ${formatRate(attribution.unattributed)}`));
+  }
+  if (rows.length) {
+    const list = element("ul", null, "spike-processes");
+    list.append(...rows);
+    details.append(list);
+  } else {
+    details.append(element("p", "No matching traffic was captured in this sample."));
+  }
+  return details;
+}
+
+function renderProcessTraffic(traffic) {
+  const processes = traffic?.top || [];
+  const unknown = traffic?.unattributed;
+  const udp = traffic?.protocols?.udp;
+  const tcp = traffic?.protocols?.tcp;
+  text("process-scope", udp === "ready" ? "UDP · 5-second sample"
+    : udp === "stale" || udp === "unavailable" ? "UDP data unavailable" : "UDP collector off");
+  text("process-timestamp", traffic?.at ? `Sample at ${time(traffic.at)}` : "Latest sample");
+  get("process-table").hidden = !processes.length;
+  get("process-empty").hidden = Boolean(processes.length);
+  text("process-empty", traffic?.state === "ready" ? "No traffic from a visible process in this sample."
+    : tcp === "warming" ? "Waiting for a second TCP sample." : "Process traffic data is unavailable.");
+  get("process-rows").replaceChildren(...processes.map((process) => {
+    const row = element("tr");
+    const tcpRx = udp === "ready" ? process.tcp_rx : process.rx;
+    const tcpTx = udp === "ready" ? process.tcp_tx : process.tx;
+    for (const value of [process.name, process.pid, formatRate(tcpRx), formatRate(tcpTx),
+                          formatRate(process.udp_rx), formatRate(process.udp_tx)]) {
+      row.append(element("td", value));
+    }
+    return row;
+  }));
+  get("process-unknown").hidden = !(unknown?.rx || unknown?.tx);
+  if (unknown) text("process-unknown",
+    `TCP without a visible owner · inbound ${formatRate(unknown.rx)} · outbound ${formatRate(unknown.tx)}`);
+}
+
 function eventList(id, records) {
+  const container = get(id);
+  const eventKey = records.map(({id, at}) => `${id}:${at}`).join(",");
+  if (container.dataset.eventKey === eventKey) return;
+  container.dataset.eventKey = eventKey;
+  const openItems = new Set(Array.from(container.querySelectorAll("details[open]"), (item) => item.dataset.event));
   const items = records.map((record) => {
     const item = element("li");
     const label = record.severity[0].toUpperCase() + record.severity.slice(1);
@@ -151,12 +275,15 @@ function eventList(id, records) {
     description.append(element("strong", record.title));
     const details = [record.subject, record.detail].filter(Boolean).join(" · ");
     if (details) description.append(element("small", details));
+    if (record.kind === "anomaly" && ["rx", "tx"].includes(record.subject)) {
+      description.append(spikeAttribution(record, openItems.has(String(record.id))));
+    }
     const when = element("time", fullDate(record.at));
     when.dateTime = date(record.at).toISOString();
     item.append(status, description, when);
     return item;
   });
-  get(id).replaceChildren(...(items.length ? items : [element("li", "No matching events.", "empty")]));
+  container.replaceChildren(...(items.length ? items : [element("li", "No matching events.", "empty")]));
 }
 
 function filterEvents() {
@@ -197,6 +324,8 @@ function render() {
     ? `${assessment.trigger === "scheduled" ? "Scheduled check · " : ""}${fullDate(assessment.at)}`
     : "");
   get("run").disabled = !active || assessing || pending;
+  renderProcessTraffic(snapshot.process_traffic);
+  renderInterfaces(snapshot.interface_traffic, snapshot.interface_spikes);
   eventList("recent-events", snapshot.events.slice(0, 5));
   filterEvents();
   const devices = snapshot.devices.map((device) => {

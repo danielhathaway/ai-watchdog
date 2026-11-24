@@ -19,6 +19,44 @@ SSH_MATCHES = (
 )
 
 
+def physical_interface(name):
+    path = (Path("/sys/class/net") / name).resolve(strict=True)
+    return path.is_relative_to("/sys/devices") and not path.is_relative_to("/sys/devices/virtual")
+
+
+def select_uplinks(names):
+    physical = []
+    for name in sorted(names):
+        try:
+            if physical_interface(name):
+                physical.append(name)
+        except FileNotFoundError:
+            # A device may disappear between the counter read and topology lookup.
+            continue
+    if physical:
+        return {"method": "physical", "uplinks": physical}
+    if len(names) == 1:
+        return {"method": "single", "uplinks": sorted(names)}
+
+    routes = []
+    if names:
+        for family in ("-4", "-6"):
+            try:
+                routes.extend(json.loads(execute(
+                    IP, family, "-j", "route", "show", "table", "main", "default", timeout=1,
+                )))
+            except subprocess.CalledProcessError:
+                continue
+    candidates = [
+        (route.get("metric", 0), hop.get("dev"))
+        for route in routes for hop in route.get("nexthops", [route])
+        if hop.get("dev") in names and "linkdown" not in hop.get("flags", ())
+    ]
+    if candidates:
+        return {"method": "default", "uplinks": [min(candidates)[1]]}
+    return {"method": "unavailable", "uplinks": []}
+
+
 def traffic(previous, at, previous_at, interval):
     counters = {}
     for line in Path("/proc/net/dev").read_text().splitlines()[2:]:
@@ -27,14 +65,23 @@ def traffic(previous, at, previous_at, interval):
         if name.strip() != "lo" and len(fields) >= 16:
             counters[name.strip()] = (int(fields[0]), int(fields[8]))
     elapsed = at - previous_at
-    if not previous or not 0 < elapsed <= 3 * interval:
-        return counters, None, None
-    rates = [0.0, 0.0]
-    for name, totals in counters.items():
-        if name in previous:
-            for column, total in enumerate(totals):
-                rates[column] += max(0, total - previous[name][column]) / elapsed
-    return counters, *rates
+    basis = select_uplinks(counters.keys())
+    included = set(basis["uplinks"])
+    rates = []
+    for name, (rx, tx) in sorted(counters.items()):
+        rx_rate = tx_rate = None
+        if name in previous and 0 < elapsed <= 3 * interval:
+            old_rx, old_tx = previous[name]
+            rx_rate = (rx - old_rx) / elapsed if rx >= old_rx else None
+            tx_rate = (tx - old_tx) / elapsed if tx >= old_tx else None
+        rates.append({"name": name, "counted": name in included, "rx": rx_rate, "tx": tx_rate})
+    totals = []
+    for metric in ("rx", "tx"):
+        observed = [interface[metric] for interface in rates if interface["counted"]]
+        totals.append(sum(observed) if observed and None not in observed else None)
+    return counters, *totals, {
+        **basis, "interfaces": rates, "window_seconds": round(elapsed, 3) if previous and 0 < elapsed <= 3 * interval else None,
+    }
 
 
 def sockets():

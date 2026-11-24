@@ -89,3 +89,14 @@ dd{margin:0;text-transform:capitalize}
 .settings-note{padding:0 18px 16px}
 #email-status dd{text-transform:none;text-align:right}
 @media(max-width:650px){nav{flex-wrap:wrap;justify-content:flex-start;gap:4px}nav a{padding-inline:6px}nav a span{display:none}}
+.process-scope,.process-note{color:var(--subtle);font-size:.85rem}
+.process-note{padding:8px 18px 14px}
+.spike-details{margin-top:5px;color:var(--subtle);font-size:.85rem}
+.spike-details summary{color:var(--accent);cursor:pointer;width:fit-content}
+.spike-details p{margin-top:4px}
+.events .spike-processes{padding:3px 0 0 17px}
+.events .spike-processes li:not(.empty){display:list-item;padding:2px 0;border:0}
+.interface-detail{border-top:1px solid var(--border);font-size:.88rem}
+.interface-detail summary{padding:10px 18px;cursor:pointer;color:var(--accent)}
+.interface-detail th,.interface-detail td{padding:8px 18px}
+.interface-window{margin:0;padding:0 18px 8px;color:var(--subtle)}

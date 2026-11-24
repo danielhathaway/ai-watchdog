@@ -14,6 +14,14 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS event_topic ON events(kind, subject, at);
 CREATE INDEX IF NOT EXISTS event_time ON events(at);
+CREATE TABLE IF NOT EXISTS traffic_attribution (
+    event_id INTEGER PRIMARY KEY, at REAL NOT NULL, snapshot TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS traffic_attribution_time ON traffic_attribution(at);
+CREATE TABLE IF NOT EXISTS interface_spikes (
+    id INTEGER PRIMARY KEY, at REAL NOT NULL, snapshot TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS interface_spike_time ON interface_spikes(at);
 CREATE TABLE IF NOT EXISTS devices (
     identity TEXT PRIMARY KEY, mac TEXT, address TEXT NOT NULL, interface TEXT NOT NULL,
     first_seen REAL NOT NULL, last_seen REAL NOT NULL, observations INTEGER NOT NULL
@@ -57,7 +65,7 @@ def event(db, at, severity, kind, title, detail="", subject="", cooldown=0):
         (kind, subject, at - cooldown),
     ).fetchone():
         return
-    db.execute(
+    inserted = db.execute(
         "INSERT INTO events(at,severity,kind,title,detail,subject) VALUES (?,?,?,?,?,?)",
         (at, severity, kind, title, detail, subject),
     )
@@ -68,11 +76,15 @@ def event(db, at, severity, kind, title, detail="", subject="", cooldown=0):
         if destination and (severity == "critical" or destination["minimum_severity"] == "high"):
             db.execute("INSERT INTO email_outbox(at,severity,title) VALUES (?,?,?)", (at, severity, title))
 
+    return inserted.lastrowid
+
 
 def expire(db, now, days):
     cutoff = now - days * 86400
     db.execute("DELETE FROM samples WHERE at < ?", (cutoff,))
     db.execute("DELETE FROM events WHERE at < ?", (cutoff,))
+    db.execute("DELETE FROM traffic_attribution WHERE at < ?", (cutoff,))
+    db.execute("DELETE FROM interface_spikes WHERE at < ?", (cutoff,))
     db.execute("DELETE FROM devices WHERE last_seen < ?", (cutoff,))
 
 
@@ -80,15 +92,35 @@ def snapshot(db, now):
     def rows(sql, parameters=()):
         return [dict(row) for row in db.execute(sql, parameters)]
 
+    baseline = property_get(db, "traffic_baseline", {})
+    current_interfaces = property_get(db, "interface_traffic")
+    spikes = [
+        {"id": row["id"], "at": row["at"], **json.loads(row["snapshot"])}
+        for row in db.execute("SELECT id,at,snapshot FROM interface_spikes ORDER BY id DESC LIMIT 20")
+    ]
     samples = rows(
         """SELECT at,rx,tx,connections,failures,risk FROM (
            SELECT id,at,rx,tx,connections,failures,risk FROM samples
            WHERE at >= ? ORDER BY id DESC LIMIT 720) ORDER BY id""",
         (now - 3600,),
     )
+    for sample in samples:
+        if current_interfaces and (not baseline or sample["at"] < baseline["since"]):
+            # Preserve the other metrics while keeping old aggregate traffic off the new chart.
+            sample["rx"] = sample["tx"] = None
+    events = rows(
+        "SELECT events.*, traffic_attribution.snapshot AS attribution FROM events "
+        "LEFT JOIN traffic_attribution ON event_id = events.id ORDER BY events.id DESC LIMIT 100"
+    )
+    for item in events:
+        if item["attribution"] is not None:
+            item["attribution"] = json.loads(item["attribution"])
     return {
         "samples": samples,
-        "events": rows("SELECT * FROM events ORDER BY id DESC LIMIT 100"),
+        "interface_traffic": current_interfaces,
+        "interface_spikes": spikes,
+        "events": events,
+        "process_traffic": property_get(db, "process_traffic", {"state": "unavailable"}),
         "devices": rows("SELECT * FROM devices ORDER BY last_seen DESC LIMIT 250"),
         "device_count": db.execute("SELECT count(*) FROM devices").fetchone()[0],
         "alert_count": db.execute(

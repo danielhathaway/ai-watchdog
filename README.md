@@ -57,6 +57,30 @@ The statistical detector learns a robust baseline for traffic and established TC
 
 For an optional natural-language summary, configure a downloaded local Ollama model in `ollama_model`. Run Ollama in local-only mode at `127.0.0.1:11434` with cloud features disabled. Restart the monitor after editing the model setting. The optional model sees numeric evidence, coverage, and event category counts. The statistical assessment continues if the model is unavailable. The model output has no command or rule execution privileges. [Ollama local-only configuration](https://github.com/ollama/ollama/blob/main/docs/faq.mdx)
 
+### Network interface totals and spike history
+
+Watchdog totals traffic at the hardware-backed interface layer. This counts Wi-Fi or Ethernet traffic at the point it leaves the host and keeps VPN, bridge, and other virtual interface readings separate. If no hardware-backed interface is visible in the namespace, Watchdog uses a single interface when there is only one, or selects one main-table default-route interface. The dashboard identifies which interfaces contributed to the total. [Linux network interface statistics](https://docs.kernel.org/networking/statistics.html)
+
+In Overview, expand **Interface breakdown** under Network traffic for the latest rates. In Activity, expand a timestamp under **Traffic spikes by interface** for the recorded rates, counted interfaces, and sample duration. Every flagged inbound or outbound sample is saved even during the Activity event cooldown. The dashboard lists the latest 20 breakdowns, and the database retains them for the configured retention period.
+
+Changing the measurement basis starts fresh inbound and outbound baselines. The traffic chart uses samples from the current basis. The TCP connection baseline and existing event history are retained.
+
+### Process traffic
+
+Overview lists the processes with the most observed TCP traffic in the latest sample. In Activity, expand an inbound or outbound traffic anomaly to see the processes observed in that direction when Watchdog logged the event. Events recorded before this feature have no process sample.
+
+Watchdog uses Linux `ss` to sample TCP socket byte counters and visible process owners. It retains names, PIDs, and rates for logged spikes. It does not record endpoints or content for this feature. Traffic from shared TCP sockets or sockets with inaccessible owners is shown separately when measurable. Very short TCP connections can disappear between samples. A VPN or locally routed traffic can cause interface counters and socket totals to differ. Treat these entries as contributors seen at the time, without using them to account for every byte in a spike. [iproute2 socket statistics manual](https://github.com/iproute2/iproute2/blob/main/man/man8/ss.8)
+
+#### Enable UDP and QUIC attribution
+
+Linux TCP monitoring works on its own. For UDP, run the optional collector on a host with bpftrace 0.25 or later, kernel BTF, and IPv4/IPv6 fexit support. The installer checks that the probes can attach and waits for the service's first usable sample.
+
+```sh
+sudo ./deploy/install-udp.sh "$(id -un)"
+```
+
+For a system-wide Watchdog service using the `ai-watchdog` account, pass `ai-watchdog` as the argument to monitor that account instead. The collector accounts for successful UDP socket operations by the selected account, including QUIC and other UDP traffic. It writes an owner-readable snapshot every five seconds. Watchdog shows separate TCP and UDP rates, with UDP blank when no recent collector sample is available. This does not inspect payloads or identify which UDP flows use QUIC. Kernel-only or forwarded UDP is outside the account's process view, and UDP loopback traffic can be included. TCP and UDP use different sample windows. [bpftrace kernel function probes](https://bpftrace.org/docs/release_025/language#fentry-and-fexit)
+
 ### Recurring AI checks
 
 Open **Settings → Recurring AI check** and enter a cadence in minutes. The first check is due one interval after saving. Use 0 to turn the schedule off. The service saves the schedule across restarts and performs one catch-up check after downtime, then resumes the saved cadence. The dashboard may be closed. Scheduled checks use the same local analysis and run one at a time with manual checks. Their results appear in Overview and Activity.
