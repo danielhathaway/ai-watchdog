@@ -2,6 +2,10 @@
 
 AI Watchdog is a local Linux endpoint monitor with a browser dashboard, on-device anomaly detection, and an independent process that can quarantine traffic or disconnect the host. Live deployments start in observe-only mode.
 
+## License
+
+AI Watchdog is licensed under the [GNU General Public License version 3 only](LICENSE), except for the optional [UDP tracing script](deploy/udp/udp.bt), which is licensed under the [GNU General Public License version 2 only](deploy/udp/COPYING).
+
 ## Try the dashboard
 
 Run from this directory with Python 3.10 or newer:

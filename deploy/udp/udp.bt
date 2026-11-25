@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 // Count payload bytes at the IPv4 and IPv6 socket layer, including mmsg calls.
 config = {
   max_map_keys = 2048;
