@@ -112,7 +112,9 @@ Use `allowed_listener_rules` to allow an exact service and interface without app
 ]
 ```
 
-Watchdog identifies the interface from a reported socket scope or a uniquely assigned local address. Wildcard binds, unscoped multicast, and ambiguous addresses remain for review unless covered by an explicit global port entry in `allowed_listeners`. This allowlist changes Watchdog's reporting. Network access is governed by the host and firewall.
+Watchdog displays the interface from a reported socket scope or a uniquely assigned local address. A service-and-interface rule requires a verified receive scope for every socket at that endpoint. A reported socket scope or a device binding can establish receive scope. A local address association or configured multicast send interface alone leaves the endpoint marked **Review**. A global port entry in `allowed_listeners` applies across interfaces. This allowlist changes Watchdog's reporting. Network access is governed by the host and firewall.
+
+UDP inventories record multicast send and receive-scope evidence per socket. On supported Linux architectures, Watchdog reads multicast send options when the kernel permits access to the owning process. The dashboard shows **Unavailable** when that access is restricted. Watchdog leaves the host's ptrace policy in effect.
 
 Record the Watchdog file baseline from trusted files. For the observe-only installation, run this from the checkout as the monitor user.
 

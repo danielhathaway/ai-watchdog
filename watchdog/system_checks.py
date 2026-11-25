@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import store
+from . import multicast, store
 from .common import BOOT_ID, execute, uptime, write_json
 from .process_traffic import SS
 from .responder import heartbeat
@@ -131,7 +131,8 @@ def health(monitor):
     ]
 
 
-LISTENER_INVENTORY_VERSION = 2
+LISTENER_INVENTORY_VERSION = 3
+MAX_MULTICAST_PROBES = 256
 SS_PROCESS = re.compile(r'\("([^"]+)",pid=(\d+),fd=(\d+)\)')
 SS_CGROUP = re.compile(r"\bcgroup:(/\S*)")
 SS_INODE = re.compile(r"\bino:(\d+)")
@@ -192,9 +193,24 @@ def matches_rule(rule, protocol, interface, service, apps):
     )
 
 
+def multicast_details(inode, scope, options, addresses, indices):
+    device = options.get("device") if options is not None else None
+    receive_interface = (device or scope) if not (device and scope and device != scope) else None
+    send = {}
+    if options and (address := options.get("ipv4")):
+        send["ipv4"] = {"address": address, "interface": listener_interface(
+            ipaddress.ip_address(address), "", addresses, indices
+        )}
+    if options and (index := options.get("ipv6")):
+        send["ipv6"] = {"index": index, "interface": indices.get(str(index))}
+    return {"inode": inode, "receive_interface": receive_interface, "multicast_send": send,
+            "socket_options_available": options is not None}
+
+
 def listeners(output, allowed=(), rules=(), interfaces=None):
     entries = {}
     apps = {}
+    probes = 0
     addresses, indices = interfaces or ({}, {})
     for line in output.splitlines():
         fields = line.split(maxsplit=6)
@@ -215,7 +231,7 @@ def listeners(output, allowed=(), rules=(), interfaces=None):
         port = int(port)
         entry = entries.setdefault((protocol, port, address), {
             "protocol": protocol, "port": port, "address": address, "socket_count": 0,
-            "processes": {}, "services": set(), "interface": interface, "allowed": True,
+            "processes": {}, "services": set(), "interface": interface, "allowed": True, "sockets": [],
         })
         entry["socket_count"] += 1
         metadata = fields[6] if len(fields) == 7 else ""
@@ -228,16 +244,26 @@ def listeners(output, allowed=(), rules=(), interfaces=None):
                     service = unit
                     entry["services"].add(unit)
                     break
-        inode = SS_INODE.search(metadata)
+        match = SS_INODE.search(metadata)
+        inode = int(match[1]) if match else None
         socket_apps = set()
+        options = None
         for name, pid, fd in SS_PROCESS.findall(metadata):
             pid = int(pid)
             if pid not in apps:
-                apps[pid] = process_app(name, pid, fd, inode[1] if inode else None)
+                apps[pid] = process_app(name, pid, fd, inode)
             entry["processes"][pid] = {"pid": pid, "name": name, "app": apps[pid]}
             socket_apps.add(apps[pid])
+            if protocol == "udp" and inode and options is None and probes < MAX_MULTICAST_PROBES:
+                probes += 1
+                options = multicast.socket_options(pid, int(fd), inode)
+        receive_interface = listener_interface(None, scope, addresses, indices)
+        if protocol == "udp":
+            details = multicast_details(inode, receive_interface, options, addresses, indices)
+            receive_interface = details["receive_interface"]
+            entry["sockets"].append(details)
         if f"{protocol}/{port}" not in allowed and not any(
-            matches_rule(rule, protocol, interface, service, socket_apps) for rule in rules
+            matches_rule(rule, protocol, receive_interface, service, socket_apps) for rule in rules
         ):
             entry["allowed"] = False
     for entry in entries.values():

@@ -90,13 +90,39 @@ udp UNCONN 0 0 *:9999 *:*
         }.items()}
         rules = [{"service": "gvfs-daemon.service", "app": "wsdd", "interface": "wlp5s0", "protocol": "udp"}]
         entries = {row["address"]: row for row in checks.listeners(output, rules=rules, interfaces=(addresses, {}))}
-        self.assertEqual({"192.168.1.20", "ff02::c%wlp5s0"},
+        self.assertEqual({"ff02::c%wlp5s0"},
                          {name for name, row in entries.items() if row["allowed"]})
         self.assertEqual("nordlynx", entries["10.5.0.2"]["interface"])
         self.assertEqual("docker0", entries["172.17.0.1"]["interface"])
         self.assertIsNone(entries["239.255.255.250"]["interface"])
         self.assertIsNone(entries["192.168.1.21"]["interface"])
         self.assertEqual(2, entries["192.168.1.22"]["socket_count"])
+
+    def test_multicast_egress_is_saved_without_approving_unverified_receive_scope(self):
+        import ipaddress
+
+        output = """udp UNCONN 0 0 *:10000 *:* users:(("wsdd",pid=2,fd=7)) ino:51 cgroup:/user.slice/gvfs-daemon.service
+udp UNCONN 0 0 *:10001 *:* users:(("wsdd",pid=2,fd=8)) ino:52 cgroup:/user.slice/gvfs-daemon.service
+udp UNCONN 0 0 *:10001 *:* users:(("wsdd",pid=2,fd=9)) ino:53 cgroup:/user.slice/gvfs-daemon.service
+udp UNCONN 0 0 *:10002 *:* users:(("wsdd",pid=2,fd=10)) ino:54 cgroup:/user.slice/gvfs-daemon.service
+"""
+        rule = {"service": "gvfs-daemon.service", "interface": "wlp5s0", "app": "wsdd"}
+        interfaces = ({ipaddress.ip_address("192.0.2.1"): {"wlp5s0"}}, {"3": "nordlynx"})
+        values = [
+            {"device": "", "ipv4": "192.0.2.1"}, {"device": "wlp5s0"}, None,
+            {"device": "wlp5s0", "ipv6": 3},
+        ]
+        with patch.object(checks.multicast, "socket_options", side_effect=values):
+            entries = checks.listeners(output, rules=[rule], interfaces=interfaces)
+        first, shared, scoped = entries
+        self.assertFalse(first["allowed"])
+        self.assertEqual("wlp5s0", first["sockets"][0]["multicast_send"]["ipv4"]["interface"])
+        self.assertIsNone(first["sockets"][0]["receive_interface"])
+        self.assertFalse(shared["allowed"])
+        self.assertFalse(shared["sockets"][1]["socket_options_available"])
+        self.assertTrue(scoped["allowed"])
+        self.assertEqual("wlp5s0", scoped["sockets"][0]["receive_interface"])
+        self.assertEqual("nordlynx", scoped["sockets"][0]["multicast_send"]["ipv6"]["interface"])
 
     def test_integrity_flags_drift_new_files_and_unsafe_baseline(self):
         baseline = self.directory / "watchdog-integrity.json"

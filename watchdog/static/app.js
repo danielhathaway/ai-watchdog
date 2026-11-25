@@ -449,11 +449,22 @@ function renderSystemChecks() {
             ...listener.processes.map(({app, pid}) => `${app} (PID ${pid})`),
             ...listener.services,
           ];
-          list.append(element("li", `${host}:${listener.port} ${listener.protocol.toUpperCase()} · `
+          const item = element("li", `${host}:${listener.port} ${listener.protocol.toUpperCase()} · `
             + (owners.join(", ") || "Owner unavailable")
             + ` · ${listener.interface || "Interface unavailable"}`
             + (listener.allowed ? " · Allowed" : " · Review")
-            + (listener.socket_count > 1 ? ` · ${listener.socket_count} sockets` : "")));
+            + (listener.socket_count > 1 ? ` · ${listener.socket_count} sockets` : ""));
+          if (listener.sockets?.length) {
+            const sockets = element("ul");
+            for (const socket of listener.sockets) {
+              const outbound = Object.entries(socket.multicast_send).map(([family, value]) =>
+                `${family === "ipv4" ? "IPv4" : "IPv6"} ${value.interface || value.address || `ifindex ${value.index}`}`);
+              const send = outbound.join(", ") || (socket.socket_options_available ? "No interface reported" : "Unavailable");
+              sockets.append(element("li", `Receive scope: ${socket.receive_interface || "Unverified"} · Multicast send: ${send}`));
+            }
+            item.append(sockets);
+          }
+          list.append(item);
         }
         inventory.append(element("summary", `Listener owners (${entry.listeners.length})`), list);
         detail.append(inventory);
