@@ -8,7 +8,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from . import analysis, notifications, schedule, store, vulnerabilities
+from . import analysis, notifications, schedule, store, system_checks, vulnerabilities
 
 STATIC = Path(__file__).with_name("static")
 ASSETS = {
@@ -191,6 +191,7 @@ class Handler(BaseHTTPRequestHandler):
                 data["schedule"] = schedule.read(db)
                 data["email"] = notifications.status(db)
                 data["vulnerabilities"] = vulnerabilities.summary(db)
+                data["system_checks"] = system_checks.read(db, monitor.settings)
             data.update({
                 "now": now, "ready": monitor.ready.is_set(), "response": monitor.response(),
                 "assessing": self.server.assessing, "interval": monitor.settings["interval"],

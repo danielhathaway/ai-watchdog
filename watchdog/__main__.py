@@ -15,7 +15,8 @@ from .common import BASELINE, CONFIG, MONITOR_RUNTIME, configuration, write_json
 MONITOR_STATE = Path("/var/lib/ai-watchdog")
 
 
-def serve(settings, state, runtime, demo=False, baseline=BASELINE, response_runtime=None):
+def serve(settings, state, runtime, demo=False, baseline=BASELINE, response_runtime=None,
+          config=CONFIG, observe_directory=None):
     from .monitor import Monitor
     from .server import Console
 
@@ -29,7 +30,8 @@ def serve(settings, state, runtime, demo=False, baseline=BASELINE, response_runt
         if len(token) < 40:
             raise ValueError("Dashboard token is missing or too short")
     monitor = Monitor(settings, state / "monitor.sqlite3", runtime, demo=demo,
-                      baseline=baseline, response_runtime=response_runtime)
+                      baseline=baseline, response_runtime=response_runtime, config=config,
+                      observe_directory=observe_directory)
     with Console(monitor, token) as console:
         console.start_workers()
         print(f"Dashboard: {console.origin}", flush=True)
@@ -71,7 +73,9 @@ def main():
     for operation in (listing, updates):
         operation.add_argument("--scope", choices=("os", "dependency", "watchdog"))
     actions.add_parser("supervise", help="Start the independent containment watchdog")
-    actions.add_parser("baseline", help="Record a known-good integrity baseline")
+    baseline = actions.add_parser("baseline", help="Record a known-good integrity baseline")
+    baseline.add_argument("--directory", type=Path, help="Record the Watchdog baseline for an observe-only installation")
+    baseline.add_argument("--watchdog-only", action="store_true", help="Record only the Watchdog application baseline")
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -142,11 +146,23 @@ def main():
         except (OSError, KeyError, ValueError, TypeError, sqlite3.Error, subprocess.SubprocessError) as error:
             parser.exit(1, f"Vulnerability check failed: {error}\n")
         return
+    if args.command == "baseline" and args.directory is not None:
+        from .system_checks import record_baseline
+
+        directory = args.directory.resolve()
+        if os.geteuid() == 0 or not directory.is_dir() or directory.stat().st_uid != os.geteuid() or (
+            directory.stat().st_mode & 0o077
+        ):
+            parser.error("Use the observe-only account and its existing private state directory.")
+        config = directory / "config.json" if args.config == CONFIG else args.config
+        count = record_baseline(directory / "watchdog-integrity.json", config, directory)
+        print(f"Recorded {count} Watchdog integrity paths.")
+        return
     settings = configuration(args.config)
     if args.command == "serve":
         if os.geteuid() == 0:
             parser.error("The monitor must run as an unprivileged user")
-        serve(settings, MONITOR_STATE, MONITOR_RUNTIME)
+        serve(settings, MONITOR_STATE, MONITOR_RUNTIME, config=args.config)
         return
     if args.command in {"observe", "observe-supervisor"}:
         if os.geteuid() == 0:
@@ -170,7 +186,8 @@ def main():
                     except (OSError, ValueError):
                         logging.warning("Unable to record initial fingerprint for %s", path)
                 write_json(baseline, {"files": records})
-            serve(settings, directory, directory, baseline=baseline, response_runtime=response_dir)
+            serve(settings, directory, directory, baseline=baseline, response_runtime=response_dir,
+                  config=args.config, observe_directory=directory)
         else:
             from .responder import loop
 
@@ -180,10 +197,14 @@ def main():
         parser.error("This operation requires root")
     if args.command == "baseline":
         from .sensors import fingerprint
+        from .system_checks import record_baseline
 
-        records = {path: fingerprint(path) for path in settings["integrity_paths"]}
-        write_json(BASELINE, {"files": records}, mode=0o644)
-        print(f"Recorded {len(records)} integrity paths in {BASELINE}")
+        if not args.watchdog_only:
+            records = {path: fingerprint(path) for path in settings["integrity_paths"]}
+            write_json(BASELINE, {"files": records}, mode=0o644)
+            print(f"Recorded {len(records)} integrity paths in {BASELINE}")
+        count = record_baseline(BASELINE.with_name("watchdog-integrity.json"), args.config, None)
+        print(f"Recorded {count} Watchdog integrity paths.")
     elif args.command == "supervise":
         from .responder import supervise
 

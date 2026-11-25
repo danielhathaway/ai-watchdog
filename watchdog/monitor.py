@@ -4,21 +4,24 @@ import subprocess
 import threading
 import time
 
-from . import analysis, sensors, store
+from . import analysis, sensors, store, system_checks
 from .network_window import NetworkSampler
-from .common import BASELINE, BOOT_ID, RESPONSE_RUNTIME, blockable, uptime, write_json
+from .common import BASELINE, BOOT_ID, CONFIG, RESPONSE_RUNTIME, blockable, uptime, write_json
 
 SENSOR_ERRORS = (OSError, ValueError, KeyError, subprocess.SubprocessError)
 
 
 class Monitor:
-    def __init__(self, settings, database, runtime, demo=False, baseline=BASELINE, response_runtime=None):
+    def __init__(self, settings, database, runtime, demo=False, baseline=BASELINE, response_runtime=None,
+                 config=CONFIG, observe_directory=None):
         self.settings = settings
         self.database = database
         self.runtime = runtime
         self.demo = demo
         self.baseline = baseline
         self.response_runtime = response_runtime or RESPONSE_RUNTIME
+        self.config = config
+        self.observe_directory = observe_directory
         self.network = NetworkSampler(settings.get("interval", 10))
         self.integrity_seen = {}
         self.lock = threading.Lock()
@@ -41,6 +44,9 @@ class Monitor:
             self.network_worker.start()
         self.worker = threading.Thread(target=self.run, name="passive-monitor", daemon=True)
         self.worker.start()
+        if not self.demo:
+            threading.Thread(target=system_checks.run, args=(self,), name="scheduled-system-checks",
+                             daemon=True).start()
 
     def run(self):
         while not self.stop.is_set():
@@ -61,7 +67,7 @@ class Monitor:
             state = json.loads((self.response_runtime / "status.json").read_text())
             state["watchdog_alive"] = state["boot_id"] == BOOT_ID and 0 <= uptime() - state["at"] < 20
             return state
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
             return {"mode": "enforce" if self.settings["enforce"] else "observe", "status": "unavailable",
                     "isolated": False, "blocked": [], "reason": "", "watchdog_alive": False}
 

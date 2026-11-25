@@ -91,6 +91,25 @@ For a system-wide Watchdog service using the `ai-watchdog` account, pass `ai-wat
 
 Open **Settings → Recurring AI check** and enter a cadence in minutes. The first check is due one interval after saving. Use 0 to turn the schedule off. The service saves the schedule across restarts and performs one catch-up check after downtime, then resumes the saved cadence. The dashboard may be closed. Scheduled checks use the same local analysis and run one at a time with manual checks. Their results appear in Overview and Activity.
 
+### Scheduled system checks
+
+The **Sensors** page shows the latest Watchdog health and host hardening results. These checks run independently of the AI schedule. New warnings and failures, and findings that return to normal, appear in Activity. The checks report findings without changing host settings.
+
+| Schedule | Defaults and coverage |
+| --- | --- |
+| Watchdog health | Every 5 minutes. Checks the heartbeat, independent supervisor, sensor status, private state permissions, and Watchdog files against a trusted baseline. |
+| Host hardening | Every 60 minutes. Inventories TCP and UDP listeners on non-loopback addresses, reviews effective default OpenSSH authentication settings, checks visible nftables input policy, and reads kernel settings for ASLR, ptrace restrictions, and link protections. |
+
+Override the cadence with `health_check_minutes` and `hardening_check_minutes` in the active configuration. Use `allowed_listeners` to list expected non-loopback ports, for example `["tcp/22", "udp/5353"]` if you intend to expose those services. The default empty allowlist surfaces every non-loopback listener for review. A listening socket can still be blocked by a firewall. SSH connection-specific `Match` rules and firewall rules outside the monitor's permissions require separate review.
+
+Record the Watchdog file baseline from trusted files. For the observe-only installation, run this from the checkout as the monitor user.
+
+```sh
+python3 -m watchdog baseline --directory .watchdog
+```
+
+The system installation records a root-owned Watchdog baseline with the existing `sudo python3 -B -m watchdog baseline` command. The baseline covers application code, dashboard assets, active configuration, service unit files and their local overrides, and installed UDP probe files when present. After an intentional update, review the files and use `sudo python3 -B -m watchdog baseline --watchdog-only` to refresh just the application baseline on system installations. The observe-only account owns its baseline, so a compromise of that account can affect what the checks report. Host-local checks also depend on the integrity of the running kernel.
+
 ### Email alerts
 
 Add an `email_alerts` object to the active configuration file. For the user installation this is `.watchdog/config.json`. For the system installation it is `/etc/ai-watchdog/config.json`. The default value `null` keeps delivery off.

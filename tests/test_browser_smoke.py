@@ -115,6 +115,8 @@ class BrowserSmoke(unittest.TestCase):
             wait_for(f"!document.querySelector('#{page}').hidden")
         click("[data-page='sensors']")
         wait_for("document.querySelector('#vulnerability-status').textContent.includes('No scan recorded')")
+        wait_for("document.querySelector('#health-check-time').textContent.includes('Every 5 min') && "
+                 "document.querySelector('#hardening-check-time').textContent.includes('Every 60 min')")
         click("[data-page='settings']")
         fill("#schedule-minutes", "60")
         click("#schedule-form button")

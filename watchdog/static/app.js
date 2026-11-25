@@ -400,6 +400,7 @@ function render() {
     row.append(element("dt", name), element("dd", state, state === "ready" ? "good-text" : "warning-text"));
     return row;
   }));
+  renderSystemChecks();
   const vulnerability = snapshot.vulnerabilities;
   const coverage = vulnerability?.status === "recorded" ? Object.entries(vulnerability.sources) : [];
   const vulnerabilityRows = [["Unresolved findings",
@@ -423,6 +424,24 @@ function render() {
     : [element("li", "No active blocks.", "empty")]));
   renderSettings();
   drawTraffic();
+}
+
+function renderSystemChecks() {
+  const labels = {pass: "Passed", warn: "Review", fail: "Failed", unknown: "Unavailable", skipped: "Skipped"};
+  const colors = {pass: "good-text", warn: "warning-text", fail: "bad-text"};
+  for (const group of ["health", "hardening"]) {
+    const report = snapshot.system_checks?.[group];
+    const cadence = report ? `Every ${number.format(report.interval_minutes)} min · ` : "";
+    text(`${group}-check-time`, cadence + (report?.at ? `Last run ${fullDate(report.at)}` : "No check recorded"));
+    const rows = (report?.checks ?? []).map((entry) => {
+      const row = element("div");
+      const detail = element("dd");
+      detail.append(element("strong", labels[entry.status], colors[entry.status]), element("span", entry.detail));
+      row.append(element("dt", entry.name), detail);
+      return row;
+    });
+    get(`${group}-checks`).replaceChildren(...rows);
+  }
 }
 
 function renderSettings() {

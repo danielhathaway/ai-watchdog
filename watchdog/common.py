@@ -26,6 +26,9 @@ DEFAULTS = {
     "ollama_model": "",
     "retention_days": 30,
     "email_alerts": None,
+    "health_check_minutes": 5,
+    "hardening_check_minutes": 60,
+    "allowed_listeners": [],
 }
 
 
@@ -43,6 +46,7 @@ def configuration(path=CONFIG):
     for key, low, high in (
         ("port", 1024, 65535), ("interval", 5, 30), ("heartbeat_timeout", 30, 300),
         ("startup_grace", 10, 600), ("retention_days", 1, 365),
+        ("health_check_minutes", 1, 10080), ("hardening_check_minutes", 1, 10080),
     ):
         if type(settings[key]) is not int or not low <= settings[key] <= high:
             raise ValueError(f"Invalid {key}")
@@ -50,6 +54,13 @@ def configuration(path=CONFIG):
         raise ValueError("heartbeat_timeout must cover at least three scans")
     if type(settings["enforce"]) is not bool:
         raise ValueError("enforce must be a boolean")
+    listeners = settings["allowed_listeners"]
+    if not isinstance(listeners, list) or len(listeners) > 256 or any(
+        not isinstance(item, str) or not re.fullmatch(r"(?:tcp|udp)/[1-9][0-9]{0,4}", item)
+        or int(item.split("/", 1)[1]) > 65535 for item in listeners
+    ):
+        raise ValueError("allowed_listeners must contain entries such as tcp/22 or udp/5353")
+    settings["allowed_listeners"] = sorted(set(listeners))
     for key in ("integrity_paths", "isolate_on_integrity", "protected_networks", "blocked_macs"):
         items = settings[key]
         if not isinstance(items, list) or len(items) > 64 or not all(
