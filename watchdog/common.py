@@ -29,6 +29,7 @@ DEFAULTS = {
     "health_check_minutes": 5,
     "hardening_check_minutes": 60,
     "allowed_listeners": [],
+    "allowed_listener_rules": [],
 }
 
 
@@ -61,6 +62,18 @@ def configuration(path=CONFIG):
     ):
         raise ValueError("allowed_listeners must contain entries such as tcp/22 or udp/5353")
     settings["allowed_listeners"] = sorted(set(listeners))
+    rules = settings["allowed_listener_rules"]
+    if not isinstance(rules, list) or len(rules) > 256:
+        raise ValueError("allowed_listener_rules must be a list of service and interface rules")
+    for rule in rules:
+        if (not isinstance(rule, dict) or not {"service", "interface"} <= rule.keys()
+                or rule.keys() - {"service", "interface", "app", "protocol"}
+                or any(not isinstance(value, str) for value in rule.values())
+                or not re.fullmatch(r"[A-Za-z0-9_.@-]{1,200}\.(?:service|scope)", rule["service"])
+                or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", rule["interface"])
+                or not re.fullmatch(r"[A-Za-z0-9_.+-]{1,100}", rule.get("app", "any"))
+                or rule.get("protocol", "udp") not in {"tcp", "udp"}):
+            raise ValueError("Invalid allowed_listener_rules entry")
     for key in ("integrity_paths", "isolate_on_integrity", "protected_networks", "blocked_macs"):
         items = settings[key]
         if not isinstance(items, list) or len(items) > 64 or not all(

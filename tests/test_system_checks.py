@@ -45,6 +45,59 @@ udp UNCONN 0 0 [ff02::fb%eth0]:5353 [::]:*
             with patch.object(checks, "execute", side_effect=PermissionError):
                 self.assertEqual("unknown", checks.ssh_check()["status"])
 
+    def test_scoped_ipv6_merges_owners_and_saves_successful_inventory(self):
+        output = """udp UNCONN 0 0 [ff02::c]%wlp5s0:3702 [::]:* users:(("python3",pid=14,fd=7)) ino:51 cgroup:/user.slice/user@1000.service/session.slice/gvfs-daemon.service
+udp UNCONN 0 0 [ff02::c%wlp5s0]:3702 [::]:* users:(("helper",pid=20,fd=8)) ino:52 cgroup:/system.slice/helper.service
+udp UNCONN 0 0 [fe80::a]%wlp5s0:3702 [::]:* ino:53 cgroup:/system.slice/discovery.service
+udp UNCONN 0 0 [::]:5353 [::]:* cgroup:/system.slice/avahi-daemon.service
+udp UNCONN 0 0 *:9999 *:*
+"""
+        with patch.object(checks, "execute", return_value=output) as execute, \
+             patch.object(checks, "interface_lookup", return_value=({}, {})), \
+             patch.object(checks, "process_app", side_effect=lambda name, *args: "wsdd" if name == "python3" else name):
+            check = checks.port_check(["udp/5353"])
+        execute.assert_called_once_with(checks.SS, "-H", "-lntu", "-p", "-e")
+        entries = {row["address"]: row for row in check["listeners"]}
+        scoped = entries["ff02::c%wlp5s0"]
+        self.assertEqual(2, scoped["socket_count"])
+        self.assertEqual(["wsdd", "helper"], [row["app"] for row in scoped["processes"]])
+        self.assertEqual(["gvfs-daemon.service", "helper.service"], scoped["services"])
+        self.assertEqual(["discovery.service"], entries["fe80::a%wlp5s0"]["services"])
+        self.assertTrue(entries["::"]["allowed"])
+        self.assertIn("owner unavailable", check["detail"])
+        checks.save(self.database, "hardening", 100, [check])
+        with store.connect(self.database) as db:
+            saved = db.execute("SELECT listeners FROM listener_inventory WHERE at = 100").fetchone()[0]
+            self.assertEqual(check["listeners"], json.loads(saved))
+            store.expire(db, 86401 + 100, 1)
+            self.assertEqual(0, db.execute("SELECT count(*) FROM listener_inventory").fetchone()[0])
+
+    def test_service_interface_allowlist_does_not_approve_ambiguous_or_shared_sockets(self):
+        import ipaddress
+
+        def row(address, process="wsdd", pid=2):
+            return (f'udp UNCONN 0 0 {address}:3702 0.0.0.0:* users:(("{process}",pid={pid},fd=7)) '
+                    "ino:51 cgroup:/user.slice/gvfs-daemon.service")
+
+        output = "\n".join((
+            row("192.168.1.20"), row("[ff02::c]%wlp5s0"), row("10.5.0.2"), row("172.17.0.1"),
+            row("0.0.0.0"), row("239.255.255.250"), row("192.168.1.21"),
+            row("192.168.1.22"), row("192.168.1.22", "other", 3),
+        ))
+        addresses = {ipaddress.ip_address(ip): names for ip, names in {
+            "192.168.1.20": {"wlp5s0"}, "10.5.0.2": {"nordlynx"}, "172.17.0.1": {"docker0"},
+            "192.168.1.21": {"wlp5s0", "docker0"}, "192.168.1.22": {"wlp5s0"},
+        }.items()}
+        rules = [{"service": "gvfs-daemon.service", "app": "wsdd", "interface": "wlp5s0", "protocol": "udp"}]
+        entries = {row["address"]: row for row in checks.listeners(output, rules=rules, interfaces=(addresses, {}))}
+        self.assertEqual({"192.168.1.20", "ff02::c%wlp5s0"},
+                         {name for name, row in entries.items() if row["allowed"]})
+        self.assertEqual("nordlynx", entries["10.5.0.2"]["interface"])
+        self.assertEqual("docker0", entries["172.17.0.1"]["interface"])
+        self.assertIsNone(entries["239.255.255.250"]["interface"])
+        self.assertIsNone(entries["192.168.1.21"]["interface"])
+        self.assertEqual(2, entries["192.168.1.22"]["socket_count"])
+
     def test_integrity_flags_drift_new_files_and_unsafe_baseline(self):
         baseline = self.directory / "watchdog-integrity.json"
         tracked = self.directory / "app.py"
@@ -86,6 +139,7 @@ udp UNCONN 0 0 [ff02::fb%eth0]:5353 [::]:*
     def test_scheduler_runs_only_due_groups_and_records_changes(self):
         settings = configuration(self.directory / "missing.json")
         warn = checks.result("ports", "Listeners", "warn", "tcp/22")
+        warn["inventory_version"] = checks.LISTENER_INVENTORY_VERSION
         checks.save(self.database, "health", 100, [])
         checks.save(self.database, "hardening", 100, [warn])
         checks.save(self.database, "hardening", 120, [warn])

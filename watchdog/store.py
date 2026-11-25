@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS interface_spikes (
     id INTEGER PRIMARY KEY, at REAL NOT NULL, snapshot TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS interface_spike_time ON interface_spikes(at);
+CREATE TABLE IF NOT EXISTS listener_inventory (
+    at REAL PRIMARY KEY, listeners TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS devices (
     identity TEXT PRIMARY KEY, mac TEXT, address TEXT NOT NULL, interface TEXT NOT NULL,
     first_seen REAL NOT NULL, last_seen REAL NOT NULL, observations INTEGER NOT NULL
@@ -85,6 +88,7 @@ def expire(db, now, days):
     db.execute("DELETE FROM events WHERE at < ?", (cutoff,))
     db.execute("DELETE FROM traffic_attribution WHERE at < ?", (cutoff,))
     db.execute("DELETE FROM interface_spikes WHERE at < ?", (cutoff,))
+    db.execute("DELETE FROM listener_inventory WHERE at < ?", (cutoff,))
     db.execute("DELETE FROM devices WHERE last_seen < ?", (cutoff,))
 
 

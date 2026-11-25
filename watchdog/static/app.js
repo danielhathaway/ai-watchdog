@@ -431,16 +431,37 @@ function renderSystemChecks() {
   const colors = {pass: "good-text", warn: "warning-text", fail: "bad-text"};
   for (const group of ["health", "hardening"]) {
     const report = snapshot.system_checks?.[group];
+    const target = get(`${group}-checks`);
+    const listenersOpen = target.querySelector(".listener-inventory")?.open ?? false;
     const cadence = report ? `Every ${number.format(report.interval_minutes)} min · ` : "";
     text(`${group}-check-time`, cadence + (report?.at ? `Last run ${fullDate(report.at)}` : "No check recorded"));
     const rows = (report?.checks ?? []).map((entry) => {
       const row = element("div");
       const detail = element("dd");
       detail.append(element("strong", labels[entry.status], colors[entry.status]), element("span", entry.detail));
+      if (entry.listeners?.length) {
+        const inventory = element("details", null, "listener-inventory");
+        inventory.open = listenersOpen;
+        const list = element("ul");
+        for (const listener of entry.listeners) {
+          const host = listener.address.includes(":") ? `[${listener.address}]` : listener.address;
+          const owners = [
+            ...listener.processes.map(({app, pid}) => `${app} (PID ${pid})`),
+            ...listener.services,
+          ];
+          list.append(element("li", `${host}:${listener.port} ${listener.protocol.toUpperCase()} · `
+            + (owners.join(", ") || "Owner unavailable")
+            + ` · ${listener.interface || "Interface unavailable"}`
+            + (listener.allowed ? " · Allowed" : " · Review")
+            + (listener.socket_count > 1 ? ` · ${listener.socket_count} sockets` : "")));
+        }
+        inventory.append(element("summary", `Listener owners (${entry.listeners.length})`), list);
+        detail.append(inventory);
+      }
       row.append(element("dt", entry.name), detail);
       return row;
     });
-    get(`${group}-checks`).replaceChildren(...rows);
+    target.replaceChildren(...rows);
   }
 }
 

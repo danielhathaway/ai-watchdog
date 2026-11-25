@@ -102,6 +102,18 @@ The **Sensors** page shows the latest Watchdog health and host hardening results
 
 Override the cadence with `health_check_minutes` and `hardening_check_minutes` in the active configuration. Use `allowed_listeners` to list expected non-loopback ports, for example `["tcp/22", "udp/5353"]` if you intend to expose those services. The default empty allowlist surfaces every non-loopback listener for review. A listening socket can still be blocked by a firewall. SSH connection-specific `Match` rules and firewall rules outside the monitor's permissions require separate review.
 
+Expand **Listener owners** in Host hardening to see each local endpoint, its visible process and service, and its allowlist status. Watchdog saves successful inventories in SQLite according to the configured retention period. The observe-only account may see a service name even when the owning process is hidden by OS permissions.
+
+Use `allowed_listener_rules` to allow an exact service and interface without approving a port across the host. Rules can also require an app name and protocol. For example, this allows GNOME Files discovery only on the named Wi-Fi interface.
+
+```json
+"allowed_listener_rules": [
+  {"service": "gvfs-daemon.service", "interface": "wlp5s0", "app": "wsdd", "protocol": "udp"}
+]
+```
+
+Watchdog identifies the interface from a reported socket scope or a uniquely assigned local address. Wildcard binds, unscoped multicast, and ambiguous addresses remain for review unless covered by an explicit global port entry in `allowed_listeners`. This allowlist changes Watchdog's reporting. Network access is governed by the host and firewall.
+
 Record the Watchdog file baseline from trusted files. For the observe-only installation, run this from the checkout as the monitor user.
 
 ```sh

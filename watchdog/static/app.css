@@ -77,6 +77,9 @@ dl div{display:flex;justify-content:space-between;align-items:center;padding:12p
 .check-results dt{flex:0 0 35%;overflow-wrap:anywhere}
 .check-results dd{text-align:right;overflow-wrap:anywhere}
 .check-results dd span{display:block;margin-top:4px;color:var(--muted)}
+.listener-inventory{margin-top:8px}
+.listener-inventory summary{cursor:pointer}
+.listener-inventory ul{padding-inline-start:18px;text-align:left}
 dd{margin:0;text-transform:capitalize}
 .unlock{max-width:460px;padding:23px}
 .unlock label{display:block;margin-top:20px;margin-bottom:5px;font-size:.9rem}

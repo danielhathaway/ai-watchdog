@@ -3,6 +3,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import stat
 import subprocess
 import time
@@ -12,7 +13,7 @@ from . import store
 from .common import BOOT_ID, execute, uptime, write_json
 from .process_traffic import SS
 from .responder import heartbeat
-from .sensors import fingerprint
+from .sensors import IP, fingerprint
 
 APP = Path(__file__).resolve().parent
 SSHD = Path("/usr/sbin/sshd")
@@ -130,35 +131,142 @@ def health(monitor):
     ]
 
 
-def listeners(output):
-    entries = set()
+LISTENER_INVENTORY_VERSION = 2
+SS_PROCESS = re.compile(r'\("([^"]+)",pid=(\d+),fd=(\d+)\)')
+SS_CGROUP = re.compile(r"\bcgroup:(/\S*)")
+SS_INODE = re.compile(r"\bino:(\d+)")
+PYTHON_PROCESS = re.compile(r"python(?:\d+(?:\.\d+)?)?")
+
+
+def process_app(name, pid, fd, inode):
+    # An interpreter's process name alone does not identify its app.
+    if not inode or not PYTHON_PROCESS.fullmatch(name):
+        return name
+    path = Path("/proc") / str(pid)
+    try:
+        if (path / "fd" / str(fd)).readlink() != Path(f"socket:[{inode}]"):
+            return name
+        with (path / "cmdline").open("rb") as stream:
+            argv = stream.read(4096).split(b"\0")
+        if len(argv) >= 3 and argv[1].startswith(b"/"):
+            script = Path(os.fsdecode(argv[1])).name
+            if re.fullmatch(r"[A-Za-z0-9_.+-]{1,100}", script):
+                return script
+    except OSError:
+        pass
+    return name
+
+
+def interface_lookup():
+    addresses = {}
+    indices = {}
+    try:
+        interfaces = json.loads(execute(IP, "-j", "address", "show"))
+        for device in interfaces:
+            name = device["ifname"]
+            indices[str(device["ifindex"])] = name
+            for row in device.get("addr_info", []):
+                address = ipaddress.ip_address(row["local"])
+                addresses.setdefault(address, set()).add(name)
+    except PROBE_ERRORS:
+        return {}, {}
+    return addresses, indices
+
+
+def listener_interface(ip, scope, addresses, indices):
+    if scope:
+        return indices.get(scope) if scope.isdecimal() else scope
+    if ip is None or ip.is_unspecified or ip.is_multicast:
+        return None
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    names = addresses.get(ip, set())
+    return next(iter(names)) if len(names) == 1 else None
+
+
+def matches_rule(rule, protocol, interface, service, apps):
+    return (
+        interface == rule["interface"] and service == rule["service"]
+        and rule.get("protocol", protocol) == protocol
+        and ("app" not in rule or apps == {rule["app"]})
+    )
+
+
+def listeners(output, allowed=(), rules=(), interfaces=None):
+    entries = {}
+    apps = {}
+    addresses, indices = interfaces or ({}, {})
     for line in output.splitlines():
-        if not line.strip():
+        fields = line.split(maxsplit=6)
+        if not fields:
             continue
-        fields = line.split()
         protocol = fields[0]
         if len(fields) < 6 or protocol not in {"tcp", "udp"}:
             raise ValueError("Unrecognized listener record")
-        address, port = fields[4].rsplit(":", 1)
+        host, port = fields[4].rsplit(":", 1)
+        address, sep, zone = host.partition("%")
         address = address.strip("[]")
-        ip = ipaddress.ip_address(address.split("%", 1)[0]) if address != "*" else None
+        ip = ipaddress.ip_address(address) if address != "*" else None
         if ip and (ip.ipv4_mapped if ip.version == 6 and ip.ipv4_mapped else ip).is_loopback:
             continue
-        entries.add((protocol, int(port), address))
-    return entries
+        scope = zone.rstrip("]")
+        interface = listener_interface(ip, scope, addresses, indices)
+        address += sep + scope
+        port = int(port)
+        entry = entries.setdefault((protocol, port, address), {
+            "protocol": protocol, "port": port, "address": address, "socket_count": 0,
+            "processes": {}, "services": set(), "interface": interface, "allowed": True,
+        })
+        entry["socket_count"] += 1
+        metadata = fields[6] if len(fields) == 7 else ""
+        service = None
+        if cgroup := SS_CGROUP.search(metadata):
+            for unit in reversed(cgroup[1].split("/")):
+                if unit.startswith(("user@", "session-")):
+                    continue
+                if unit.endswith((".service", ".scope")):
+                    service = unit
+                    entry["services"].add(unit)
+                    break
+        inode = SS_INODE.search(metadata)
+        socket_apps = set()
+        for name, pid, fd in SS_PROCESS.findall(metadata):
+            pid = int(pid)
+            if pid not in apps:
+                apps[pid] = process_app(name, pid, fd, inode[1] if inode else None)
+            entry["processes"][pid] = {"pid": pid, "name": name, "app": apps[pid]}
+            socket_apps.add(apps[pid])
+        if f"{protocol}/{port}" not in allowed and not any(
+            matches_rule(rule, protocol, interface, service, socket_apps) for rule in rules
+        ):
+            entry["allowed"] = False
+    for entry in entries.values():
+        entry["processes"] = [entry["processes"][pid] for pid in sorted(entry["processes"])]
+        entry["services"] = sorted(entry["services"])
+    return [entries[key] for key in sorted(entries)]
 
 
-def port_check(allowed):
+def port_check(allowed, rules=()):
     name = "Non-loopback listening ports"
     try:
-        entries = listeners(execute(SS, "-H", "-lntu"))
+        output = execute(SS, "-H", "-lntu", "-p", "-e")
+        entries = listeners(output, set(allowed), rules, interface_lookup())
     except PROBE_ERRORS:
-        return result("ports", name, "unknown", "Listening sockets could not be inventoried.")
-    unexpected = sorted(entry for entry in entries if f"{entry[0]}/{entry[1]}" not in allowed)
-    detail = ", ".join(f"{proto}/{port} ({addr})" for proto, port, addr in unexpected[:30])
+        return {**result("ports", name, "unknown", "Listening sockets could not be inventoried."),
+                "inventory_version": LISTENER_INVENTORY_VERSION}
+
+    unexpected = []
+    for entry in entries:
+        if not entry["allowed"]:
+            label = f'{entry["protocol"]}/{entry["port"]}'
+            owners = sorted({process["app"] for process in entry["processes"]} | set(entry["services"]))
+            unexpected.append(f'{label} ({entry["address"]}) — ' + (", ".join(owners) or "owner unavailable"))
     if unexpected:
-        return result("ports", name, "warn", f"{len(unexpected)} listeners outside the allowlist: {detail}")
-    return result("ports", name, "pass", f"{len(entries)} non-loopback listeners, all on allowed ports.")
+        detail = f"{len(unexpected)} listeners outside the allowlist: " + "; ".join(unexpected[:30])
+        check = result("ports", name, "warn", detail)
+    else:
+        check = result("ports", name, "pass", f"{len(entries)} non-loopback listeners, all on allowed ports.")
+    return {**check, "inventory_version": LISTENER_INVENTORY_VERSION, "listeners": entries}
 
 
 def ssh_check():
@@ -208,7 +316,7 @@ def firewall_check():
 
 
 def hardening(settings):
-    return [port_check(settings["allowed_listeners"]), ssh_check(), firewall_check(),
+    return [port_check(settings["allowed_listeners"], settings["allowed_listener_rules"]), ssh_check(), firewall_check(),
             *(kernel_check(key, minimum) for key, minimum in KERNEL_SETTINGS.items())]
 
 
@@ -235,6 +343,11 @@ def save(database, group, now, rows):
                 continue
             store.event(db, now, severity, "system-check", f'{row["name"]}: {row["status"]}',
                         row["detail"], f'{group}/{row["id"]}')
+        if group == "hardening":
+            for row in rows:
+                if row["id"] == "ports" and "listeners" in row:
+                    db.execute("INSERT INTO listener_inventory(at, listeners) VALUES (?, ?)",
+                               (now, json.dumps(row["listeners"])))
         saved[group] = {"at": now, "boot_id": BOOT_ID, "checks": rows}
         store.property_set(db, "system_checks", saved)
 
@@ -249,7 +362,11 @@ def run(monitor):
             for group, collect in (("health", lambda: health(monitor)), ("hardening", lambda: hardening(monitor.settings))):
                 previous = saved[group]
                 elapsed = time.time() - previous.get("at", 0)
-                if previous.get("boot_id") == BOOT_ID and 0 <= elapsed < previous["interval_minutes"] * 60:
+                outdated = group == "hardening" and any(
+                    row["id"] == "ports" and row.get("inventory_version") != LISTENER_INVENTORY_VERSION
+                    for row in previous.get("checks", [])
+                )
+                if not outdated and previous.get("boot_id") == BOOT_ID and 0 <= elapsed < previous["interval_minutes"] * 60:
                     continue
                 try:
                     rows = collect()
