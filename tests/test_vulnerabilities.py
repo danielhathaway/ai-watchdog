@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import tarfile
 import tempfile
 import time
@@ -8,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from watchdog import store, vulnerabilities as vuln
+from watchdog.__main__ import main
 
 CVE = "CVE-2026-10001"
 WATCHDOG_ID = "WD-2026-001"
@@ -49,6 +51,17 @@ class VulnerabilitiesTests(unittest.TestCase):
         with patch.object(vuln, "os_release", return_value=RELEASE), \
              patch.object(vuln, "package_inventory", return_value=inventory):
             return vuln.refresh(self.db, archive=self.archive, manifest=self.manifest if watchdog else None)
+
+    def test_cli_rejects_refresh_as_the_wrong_account_before_opening_sqlite(self):
+        args = ["watchdog", "vulnerabilities", "--directory", str(self.directory), "refresh"]
+        with patch("sys.argv", args), patch("sys.stderr", new_callable=io.StringIO) as stderr, \
+             patch("watchdog.__main__.os.geteuid", return_value=os.geteuid() + 1), \
+             patch("watchdog.store.initialize") as initialize, patch("watchdog.__main__.os.umask"):
+            with self.assertRaises(SystemExit) as error:
+                main()
+        self.assertEqual(2, error.exception.code)
+        self.assertIn("account that owns the monitor state", stderr.getvalue())
+        initialize.assert_not_called()
 
     def test_source_package_backport_and_removal_reconcile_persisted_rows(self):
         archive(self.archive, [

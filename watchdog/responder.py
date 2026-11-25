@@ -127,11 +127,21 @@ def exclusive():
 
 def load_latch():
     try:
-        return json.loads((RESPONSE_STATE / "isolation.json").read_text())
+        state = json.loads((RESPONSE_STATE / "isolation.json").read_text())
     except FileNotFoundError:
         return None
-    except (ValueError, RecursionError):
+    except (OSError, ValueError, RecursionError):
+        state = None
+    if (
+        not isinstance(state, dict)
+        or not isinstance(state.get("reason"), str) or not state["reason"]
+        or not isinstance(state.get("boot_id"), str) or not state["boot_id"]
+        or not isinstance(state.get("links"), dict)
+        or any(not key.isdecimal() or not isinstance(name, str) or not name
+               for key, name in state["links"].items())
+    ):
         return {"reason": "Containment state is unreadable", "boot_id": BOOT_ID, "links": {}}
+    return state
 
 
 def persist_latch(state):

@@ -116,7 +116,7 @@ Restart the monitor after changing the configuration:
 systemctl --user restart ai-watchdog-observe.service
 ```
 
-For a system-wide installation, restart `ai-watchdog.service` and use a local TLS relay allowed by the service's loopback network policy. Check relay connectivity and delivery while in observe mode before relying on alerts.
+For a system-wide installation, use a local TLS relay allowed by the service's loopback network policy. Apply configuration changes with the maintenance sequence below. Check relay connectivity and delivery while in observe mode before relying on alerts.
 
 New high and critical events enter a local queue. Set `minimum_severity` to `critical` for critical-only alerts. Each email includes event titles, severity, and timestamps. IP addresses, device identities, file paths, and raw logs stay in Watchdog. Delivery is batched, retried on failure, and expires after 24 hours. The Settings page shows pending alerts, the next retry, and the last time SMTP accepted a batch. If the computer is disconnected, alerts can only be delivered once the relay becomes reachable again.
 
@@ -130,10 +130,14 @@ Set `"enforce": true` to enable the following policies:
 - **Device block.** The administrator can add hardware addresses such as `00:11:22:33:44:55` to `blocked_macs`. The firewall drops incoming and forwarded IP packets bearing those source MACs at the endpoint. This is useful for directly attached peers. A MAC address can change or be spoofed, and the rule does not control the router or other hosts.
 - **Host isolation.** The supervisor latches isolation after monitor unresponsiveness, confirmed drift on a path explicitly listed in `isolate_on_integrity`, or three consecutive failures applying a qualifying temporary block. It filters non-loopback IPv4/IPv6 traffic and takes non-loopback links down in the host network namespace. Systemd restarts the supervisor if it hangs. The supervisor reasserts isolation after service restart and reboot. [nftables manual](https://netfilter.org/projects/nftables/manpage.html) · [systemd service watchdog](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 
-Restart both units to activate policy changes:
+Apply policy changes from the local console. Stop the responder first, restart the monitor, then wait for a healthy monitor before starting the responder. Substitute your configured dashboard port if it differs.
 
 ```sh
-sudo systemctl restart ai-watchdog.service ai-watchdog-response.service
+sudo systemctl stop ai-watchdog-response.service
+sudo systemctl restart ai-watchdog.service
+curl --fail --silent --show-error --retry 12 --retry-delay 1 --retry-connrefused \
+    http://127.0.0.1:8765/health &&
+    sudo systemctl start ai-watchdog-response.service
 ```
 
 Confirm actual IPv4/IPv6 connectivity loss, loopback dashboard access, and recovery on a disposable host before relying on enforcement. An expected shutdown of the monitor while the supervisor is active can trigger containment. Stop the response service first for planned maintenance. When switching from enforcement to observe-only, stop the responder and use the recovery command below to remove its existing rules.
@@ -146,7 +150,10 @@ After investigating the incident, run from the physical or out-of-band console:
 sudo systemctl stop ai-watchdog-response.service
 cd /opt/ai-watchdog
 sudo python3 -B -m watchdog recover
-sudo systemctl start ai-watchdog.service ai-watchdog-response.service
+sudo systemctl start ai-watchdog.service
+curl --fail --silent --show-error --retry 12 --retry-delay 1 --retry-connrefused \
+    http://127.0.0.1:8765/health &&
+    sudo systemctl start ai-watchdog-response.service
 ```
 
 Recovery restores matching links the supervisor recorded in this boot, removes its nftables table, and clears the isolation latch. After reboot or if a link or network manager has changed, restore connectivity through the host's usual network manager as needed. Verify any changed integrity files before authorizing a new baseline. If the original trigger remains, the supervisor can isolate the host again.
@@ -201,6 +208,14 @@ python3 -m watchdog vulnerabilities --directory .watchdog refresh
 python3 -m watchdog vulnerabilities --directory .watchdog list
 python3 -m watchdog vulnerabilities --directory .watchdog updates
 python3 -m watchdog vulnerabilities --directory .watchdog evidence --hours 24
+```
+
+For the system-wide installation, run vulnerability commands as the service account so SQLite and the monitor have the same file ownership. From the installed application directory, the default state path is `/var/lib/ai-watchdog`.
+
+```sh
+cd /opt/ai-watchdog
+sudo -u ai-watchdog -- python3 -B -m watchdog vulnerabilities refresh
+sudo -u ai-watchdog -- python3 -B -m watchdog vulnerabilities list
 ```
 
 `refresh` matches Canonical's [Ubuntu OSV feed](https://documentation.ubuntu.com/security/security-updates/osv/) against local dpkg source versions, including packaged Watchdog runtime dependencies. It also accepts `--ubuntu-archive PATH` for offline refreshes. Ubuntu archive packages are covered. Snap, manually installed programs, external package feeds, and Ubuntu Pro-only ecosystems are outside current coverage. The download does not send the inventory. The archive is expanded incrementally and can take a few minutes.

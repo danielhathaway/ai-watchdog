@@ -14,7 +14,8 @@ test -r /sys/kernel/btf/vmlinux
 test -x /usr/bin/bpftrace
 /usr/bin/bpftrace --dry-run "$source_dir/udp.bt" "$uid"
 install -d -o root -g root -m 0755 /opt/ai-watchdog-udp
-install -o root -g root -m 0644 "$source_dir/collector.py" "$source_dir/udp.bt" /opt/ai-watchdog-udp/
+install -o root -g root -m 0644 "$source_dir/collector.py" "$source_dir/udp.bt" "$source_dir/COPYING" /opt/ai-watchdog-udp/
+install -o root -g root -m 0644 "$source_dir/../../LICENSE" /opt/ai-watchdog-udp/LICENSE
 install -o root -g root -m 0644 "$source_dir/ai-watchdog-udp@.service" /etc/systemd/system/
 systemctl daemon-reload
 unit="ai-watchdog-udp@$uid.service"

@@ -1,11 +1,11 @@
 import argparse
 import json
-import sqlite3
-import subprocess
 import logging
 import os
 import secrets
 import signal
+import sqlite3
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -88,6 +88,10 @@ def main():
 
         database = args.directory / "monitor.sqlite3"
         try:
+            if args.directory.stat().st_uid != os.geteuid() or (
+                database.exists() and database.stat().st_uid != os.geteuid()
+            ):
+                parser.error("Run vulnerability checks as the account that owns the monitor state.")
             if args.operation == "refresh":
                 store.initialize(database)
                 default_manifest = args.directory / "watchdog-advisories.json"

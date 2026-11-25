@@ -38,6 +38,19 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(original["sha256"], sensors.fingerprint(path)["sha256"])
         self.assertNotEqual(original, sensors.fingerprint(path))
 
+    def test_malformed_isolation_latch_preserves_containment(self):
+        path = self.directory / "isolation.json"
+        valid = {"reason": "monitor stopped", "boot_id": BOOT_ID, "links": {"2": "eth0"}}
+        fallback = {"reason": "Containment state is unreadable", "boot_id": BOOT_ID, "links": {}}
+        with patch.object(responder, "RESPONSE_STATE", self.directory):
+            self.assertIsNone(responder.load_latch())
+            write_json(path, valid)
+            self.assertEqual(valid, responder.load_latch())
+            for invalid in (None, [], {}, {**valid, "links": []}, {**valid, "links": {"eth0": 2}}):
+                with self.subTest(invalid=invalid):
+                    write_json(path, invalid)
+                    self.assertEqual(fallback, responder.load_latch())
+
     def test_heartbeat_rejects_symlinks_stale_and_foreign_boot(self):
         runtime = self.directory
         path = runtime / "heartbeat.json"

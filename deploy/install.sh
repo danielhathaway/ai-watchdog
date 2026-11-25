@@ -16,9 +16,14 @@ if ! id ai-watchdog > /dev/null 2>&1; then
     useradd --system --gid ai-watchdog --no-create-home --shell /usr/sbin/nologin ai-watchdog
 fi
 install -d -o root -g root -m 0755 /opt/ai-watchdog/watchdog/static /etc/ai-watchdog
+install -o root -g root -m 0644 "$source_dir/LICENSE" /opt/ai-watchdog/LICENSE
 install -o root -g root -m 0644 "$source_dir"/watchdog/*.py /opt/ai-watchdog/watchdog/
-install -o root -g root -m 0644 "$source_dir"/watchdog/static/* /opt/ai-watchdog/watchdog/static/
-install -o root -g root -m 0644 "$source_dir"/deploy/*.service /etc/systemd/system/
+for asset in index.html app.css app.js; do
+    install -o root -g root -m 0644 "$source_dir/watchdog/static/$asset" /opt/ai-watchdog/watchdog/static/
+done
+for unit in ai-watchdog.service ai-watchdog-response.service; do
+    install -o root -g root -m 0644 "$source_dir/deploy/$unit" /etc/systemd/system/
+done
 if [ ! -e /etc/ai-watchdog/config.json ]; then
     install -o root -g root -m 0644 "$source_dir/deploy/config.json" /etc/ai-watchdog/config.json
 fi
