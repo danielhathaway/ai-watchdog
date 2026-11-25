@@ -106,11 +106,8 @@ function drawTraffic() {
     ctx.lineWidth = 2;
     ctx.beginPath();
     let previous = null;
-    for (const sample of samples) {
-      if (sample[metric] == null) {
-        previous = null;
-        continue;
-      }
+    for (const sample of usable) {
+      if (sample[metric] == null) continue;
       const px = x(sample.at);
       const py = y(sample[metric]);
       if (previous != null && sample.at - previous <= Math.max(75, interval * 3)) ctx.lineTo(px, py);
@@ -118,7 +115,7 @@ function drawTraffic() {
       previous = sample.at;
     }
     ctx.stroke();
-    const latest = samples.at(-1);
+    const latest = usable.at(-1);
     if (latest?.[metric] != null) {
       ctx.beginPath();
       ctx.arc(x(latest.at), y(latest[metric]), 3, 0, 2 * Math.PI);
@@ -126,7 +123,7 @@ function drawTraffic() {
     }
     ctx.restore();
   }
-  const latest = samples.at(-1);
+  const latest = snapshot.interface_traffic || usable.at(-1);
   text("traffic-detail", latest?.rx != null || latest?.tx != null
     ? `Current inbound ${formatRate(latest.rx)} · outbound ${formatRate(latest.tx)}`
     : "Waiting for traffic samples");
@@ -139,11 +136,11 @@ function element(tag, content, className) {
   return node;
 }
 
-function interfaceTable(interfaces) {
+function rateTable(columns, rows) {
   const wrapper = element("div", null, "table-wrap");
   const table = element("table");
   const heading = element("tr");
-  for (const label of ["Interface", "In total", "Inbound", "Outbound"]) {
+  for (const label of columns) {
     const column = element("th", label);
     column.scope = "col";
     heading.append(column);
@@ -151,17 +148,68 @@ function interfaceTable(interfaces) {
   const head = element("thead");
   head.append(heading);
   const body = element("tbody");
-  const ordered = interfaces.toSorted((a, b) => Number(b.counted) - Number(a.counted));
-  for (const {name, counted, rx, tx} of ordered) {
-    const row = element("tr");
-    for (const cell of [name, counted ? "Yes" : "No", formatRate(rx), formatRate(tx)]) {
-      row.append(element("td", cell));
-    }
-    body.append(row);
-  }
+  body.append(...rows);
   table.append(head, body);
   wrapper.append(table);
   return wrapper;
+}
+
+function cells(values) {
+  const row = element("tr");
+  for (const value of values) row.append(element("td", value));
+  return row;
+}
+
+function formatCount(value) {
+  return value == null ? "—" : number.format(value);
+}
+
+function sampleAccounting(attribution) {
+  if (!attribution.payload_rates) return null;
+  const labels = {tcp: ["TCP payload", "TCP segments", "Estimated IP + TCP headers (B)"],
+                  udp: ["UDP payload", attribution.framing_sources?.udp === "test_client"
+                    ? "UDP datagrams (test client)" : "UDP datagram calls", "Estimated UDP headers (B)"]};
+  const rows = [];
+  for (const protocol of ["tcp", "udp"]) {
+    const payload = attribution.payload_rates[protocol];
+    if (!payload) continue;
+    const framing = attribution.framing[protocol] || {};
+    rows.push(cells([labels[protocol][0], formatRate(payload.rx), formatRate(payload.tx)]));
+    if (framing.rx || framing.tx) {
+      rows.push(cells([labels[protocol][1], formatCount(framing.rx?.packets), formatCount(framing.tx?.packets)]));
+      rows.push(cells([labels[protocol][2], formatCount(framing.rx?.header_bytes), formatCount(framing.tx?.header_bytes)]));
+    }
+  }
+  return rateTable(["Process traffic total", "Inbound", "Outbound"], rows);
+}
+
+function interfaceTable(interfaces) {
+  const ordered = interfaces.toSorted((a, b) => Number(b.counted) - Number(a.counted));
+  const hasPackets = ordered.some((row) => row.rx_packets != null || row.tx_packets != null);
+  const columns = ["Interface", "In total", "Inbound", "Outbound"];
+  if (hasPackets) columns.push("Packets in", "Packets out");
+  return rateTable(columns, ordered.map(({name, counted, rx, tx, rx_packets, tx_packets}) => {
+    const values = [name, counted ? "Yes" : "No", formatRate(rx), formatRate(tx)];
+    if (hasPackets) values.push(formatCount(rx_packets), formatCount(tx_packets));
+    return cells(values);
+  }));
+}
+
+function processRows(processes, protocols) {
+  return processes.map((process) => {
+    const hasUDP = protocols?.udp === "ready";
+    const tcpRx = hasUDP ? process.tcp_rx : process.rx;
+    const tcpTx = hasUDP ? process.tcp_tx : process.tx;
+    return cells([process.name, process.pid, formatRate(tcpRx), formatRate(tcpTx),
+                  formatRate(process.udp_rx), formatRate(process.udp_tx)]);
+  });
+}
+
+function windowLabel(sample) {
+  const times = (at) => date(at).toLocaleTimeString([], {
+    hour: "numeric", minute: "2-digit", second: "2-digit",
+  });
+  return `${times(sample.window_start)}–${times(sample.at)} · ${number.format(sample.window_seconds)} s shared window`;
 }
 
 function renderInterfaces(current, spikes = []) {
@@ -190,9 +238,27 @@ function renderInterfaces(current, spikes = []) {
     });
     detail.append(element("summary", `${stamp} · ${rates.join(" · ")}`));
     if (spike.window_seconds) {
-      detail.append(element("p", `${number.format(spike.window_seconds)} s sample`, "interface-window"));
+      const label = spike.window_start != null ? windowLabel(spike) : `${number.format(spike.window_seconds)} s interface sample`;
+      detail.append(element("p", label, "interface-window"));
     }
     detail.append(interfaceTable(spike.interfaces));
+    if (spike.attribution) {
+      const {top = [], protocols} = spike.attribution;
+      const missing = (["tcp", "udp"]).filter((key) => protocols[key] !== "ready").map((key) => key.toUpperCase());
+      const label = missing.length ? `${missing.join(" and ")} data unavailable for this window.` : "";
+      if (top.length) {
+        detail.append(element("p", "Process traffic", "interface-window spike-process-title"),
+          rateTable(["Process", "PID", "TCP in", "TCP out", "UDP in", "UDP out"], processRows(top, protocols)));
+      } else if (!label) {
+        detail.append(element("p", "No attributed process traffic in this window.", "interface-window spike-process-title"));
+      }
+      const accounting = sampleAccounting(spike.attribution);
+      if (accounting) detail.append(accounting);
+      if (spike.attribution.payload_rates?.udp && !Object.keys(spike.attribution.framing?.udp || {}).length) {
+        detail.append(element("p", "UDP packet counts require the updated collector.", "interface-window spike-process-title"));
+      }
+      if (label) detail.append(element("p", label, "interface-window spike-process-title"));
+    }
     return detail;
   });
   container.replaceChildren(...(entries.length ? entries : [element("p", "No interface breakdowns recorded yet.", "empty")]));
@@ -236,23 +302,15 @@ function renderProcessTraffic(traffic) {
   const unknown = traffic?.unattributed;
   const udp = traffic?.protocols?.udp;
   const tcp = traffic?.protocols?.tcp;
-  text("process-scope", udp === "ready" ? "UDP · 5-second sample"
+  text("process-scope", udp === "ready" ? "TCP / UDP"
     : udp === "stale" || udp === "unavailable" ? "UDP data unavailable" : "UDP collector off");
-  text("process-timestamp", traffic?.at ? `Sample at ${time(traffic.at)}` : "Latest sample");
+  text("process-timestamp", traffic?.window_start != null ? windowLabel(traffic)
+    : traffic?.at ? `Sample at ${time(traffic.at)}` : "Latest sample");
   get("process-table").hidden = !processes.length;
   get("process-empty").hidden = Boolean(processes.length);
   text("process-empty", traffic?.state === "ready" ? "No traffic from a visible process in this sample."
     : tcp === "warming" ? "Waiting for a second TCP sample." : "Process traffic data is unavailable.");
-  get("process-rows").replaceChildren(...processes.map((process) => {
-    const row = element("tr");
-    const tcpRx = udp === "ready" ? process.tcp_rx : process.rx;
-    const tcpTx = udp === "ready" ? process.tcp_tx : process.tx;
-    for (const value of [process.name, process.pid, formatRate(tcpRx), formatRate(tcpTx),
-                          formatRate(process.udp_rx), formatRate(process.udp_tx)]) {
-      row.append(element("td", value));
-    }
-    return row;
-  }));
+  get("process-rows").replaceChildren(...processRows(processes, traffic?.protocols));
   get("process-unknown").hidden = !(unknown?.rx || unknown?.tx);
   if (unknown) text("process-unknown",
     `TCP without a visible owner · inbound ${formatRate(unknown.rx)} · outbound ${formatRate(unknown.tx)}`);
@@ -340,6 +398,20 @@ function render() {
   get("sensor-rows").replaceChildren(...Object.entries(sensors).map(([name, state]) => {
     const row = element("div");
     row.append(element("dt", name), element("dd", state, state === "ready" ? "good-text" : "warning-text"));
+    return row;
+  }));
+  const vulnerability = snapshot.vulnerabilities;
+  const coverage = vulnerability?.status === "recorded" ? Object.entries(vulnerability.sources) : [];
+  const vulnerabilityRows = [["Unresolved findings",
+    vulnerability?.status === "recorded" ? number.format(vulnerability.unresolved) : "No scan recorded"]];
+  for (const [source, detail] of coverage) {
+    const name = source === "watchdog" ? "Watchdog advisories" : (source === "os" ? "OS advisories" : source);
+    vulnerabilityRows.push([name, detail.status === "ready" ? fullDate(detail.checked_at)
+      : detail.status.replaceAll("-", " ")]);
+  }
+  get("vulnerability-status").replaceChildren(...vulnerabilityRows.map(([name, value]) => {
+    const row = element("div");
+    row.append(element("dt", name), element("dd", value));
     return row;
   }));
   get("blocks").replaceChildren(...(response.blocked.length

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from watchdog import analysis, monitor, process_traffic, sensors, store, udp_traffic
+from watchdog import analysis, monitor, process_traffic, sensors, store
 from watchdog.common import configuration
 
 
@@ -24,6 +24,17 @@ class ProcessTrafficTests(unittest.TestCase):
             "af": process_traffic.SocketReading(None, 0, 0),
         }, readings)
 
+    def test_tcp_segment_deltas_supply_a_minimum_header_estimate(self):
+        base = 'ESTAB 0 0 10.0.0.2:41000 203.0.113.3:443 users:(("web",pid=7,fd=3)) ino:12 sk:ac <-> cubic '
+        previous = process_traffic.parse(base + "segs_in:10 segs_out:15 bytes_received:1024")
+        current = process_traffic.parse(base + "segs_in:27 segs_out:26 bytes_received:2048")
+        with patch.object(process_traffic, "name", return_value="web"):
+            summary = process_traffic.summarize(previous, current, 10, 10)
+        self.assertEqual({"packets": 17, "header_bytes": 680}, summary["framing"]["tcp"]["rx"])
+        self.assertEqual(11, summary["top"][0]["tcp_tx_packets"])
+        self.assertEqual(440, summary["top"][0]["tcp_tx_header_bytes"])
+        self.assertEqual(102.4, summary["payload_rates"]["tcp"]["rx"])
+
     def test_deltas_rank_owners_and_do_not_assign_a_socket_that_changed_hands(self):
         row = process_traffic.SocketReading
         previous = {"a": row(7, 200, 50), "b": row(9, 1000, 20), "c": row(8, 40, 80)}
@@ -42,20 +53,20 @@ class ProcessTrafficTests(unittest.TestCase):
             settings = configuration(root / "missing.json")
             app = monitor.Monitor(settings, root / "db", root, baseline=root / "missing.json")
             row = process_traffic.SocketReading
-            app.previous_sockets = {"a": row(7, 1024, 0)}
-            app.previous_socket_at = 90
+            with patch.object(process_traffic, "name", return_value="web"):
+                attribution = process_traffic.summarize({"a": row(7, 1024, 0)}, {"a": row(7, 2001024, 0)}, 10, 10)
+            window = {"at": 100, "window_start": 90, "window_seconds": 10, "attribution": attribution,
+                      "interface": {"method": "physical", "uplinks": ["eth0"], "interfaces": [], "rx": 300000, "tx": 100}}
             with (
                 patch.object(app, "response", return_value={
                     "status": "observing", "reason": "", "watchdog_alive": True, "blocked": [],
                 }),
                 patch.object(monitor, "uptime", return_value=100),
-                patch.object(sensors, "traffic", return_value=({}, 300000, 100, {"method": "physical", "uplinks": ["eth0"], "interfaces": []})),
+                patch.object(monitor.time, "time", return_value=100),
+                patch.object(app.network, "snapshot", return_value=window),
                 patch.object(sensors, "sockets", return_value=(1, 0, 0)),
                 patch.object(sensors, "neighbors", return_value=[]),
                 patch.object(sensors, "ssh_failures", return_value=([], None, False)),
-                patch.object(udp_traffic, "read_snapshot", return_value={"state": "off"}),
-                patch.object(process_traffic, "capture", return_value={"a": row(7, 2001024, 0)}),
-                patch.object(process_traffic, "name", return_value="web"),
                 patch.object(analysis, "deviations", return_value=[{"metric": "rx", "observed": 300000, "threshold": 250000}]),
             ):
                 app.scan()

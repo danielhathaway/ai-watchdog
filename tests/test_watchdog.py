@@ -153,7 +153,6 @@ class WatchdogTests(unittest.TestCase):
                 "status": "observing", "reason": "", "watchdog_alive": True, "blocked": [],
             }),
             patch.object(monitor.time, "time", return_value=observed),
-            patch.object(sensors, "traffic", return_value=({"eth0": (5, 7)}, 100, 200, {"method": "physical", "uplinks": ["eth0"], "interfaces": []})),
             patch.object(sensors, "sockets", return_value=(12, 0, 0)),
             patch.object(sensors, "neighbors", return_value=[("00:11:22:33:44:55", "192.168.1.4", "eth0")]),
             patch.object(sensors, "ssh_failures", return_value=(failures, "cursor-11", False)),

@@ -1,6 +1,6 @@
 // Count payload bytes at the IPv4 and IPv6 socket layer, including mmsg calls.
 config = {
-  max_map_keys = 1024;
+  max_map_keys = 2048;
   print_maps_on_exit = false;
 }
 
@@ -8,9 +8,11 @@ fexit:inet_sendmsg,fexit:inet6_sendmsg
 /uid == $1 && retval > 0 && args.sock->sk->sk_protocol == 17/
 {
   if (((uint64)nsecs(monotonic) / 5000000000) % 2 == 0) {
-    @even[((uint64)pid << 1) | 1] = sum((uint64)retval);
+    @even[((uint64)pid << 2) | 1] = sum((uint64)retval);
+    @even[((uint64)pid << 2) | 3] = sum((uint64)1);
   } else {
-    @odd[((uint64)pid << 1) | 1] = sum((uint64)retval);
+    @odd[((uint64)pid << 2) | 1] = sum((uint64)retval);
+    @odd[((uint64)pid << 2) | 3] = sum((uint64)1);
   }
 }
 
@@ -18,9 +20,11 @@ fexit:inet_recvmsg,fexit:inet6_recvmsg
 /uid == $1 && retval > 0 && !(args.flags & 0x2002) && args.sock->sk->sk_protocol == 17/
 {
   if (((uint64)nsecs(monotonic) / 5000000000) % 2 == 0) {
-    @even[(uint64)pid << 1] = sum((uint64)retval);
+    @even[(uint64)pid << 2] = sum((uint64)retval);
+    @even[((uint64)pid << 2) | 2] = sum((uint64)1);
   } else {
-    @odd[(uint64)pid << 1] = sum((uint64)retval);
+    @odd[(uint64)pid << 2] = sum((uint64)retval);
+    @odd[((uint64)pid << 2) | 2] = sum((uint64)1);
   }
 }
 

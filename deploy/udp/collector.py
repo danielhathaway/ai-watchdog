@@ -22,17 +22,17 @@ def parse_map(line):
             break
     else:
         return None
-    rows = defaultdict(lambda: [0, 0])
+    rows = defaultdict(lambda: [0, 0, 0, 0])
     counters = data[map_name]
     epoch = counters.get("0")
     if type(epoch) is not int or epoch <= 0:
         raise ValueError("Missing UDP window marker")
     for key, value in counters.items():
         encoded = int(key)
-        if type(value) is not int or value < 0 or not 0 <= encoded < 2**33:
+        if type(value) is not int or value < 0 or not 0 <= encoded < 2**34:
             raise ValueError("Invalid UDP counter")
-        if encoded >= 2 and value:
-            rows[encoded >> 1][encoded & 1] += value
+        if encoded >= 4 and value:
+            rows[encoded >> 2][encoded & 3] += value
     return epoch, rows
 
 
@@ -87,7 +87,9 @@ def collect(uid):
                 ended = epoch * WINDOW_SECONDS
                 if last_epoch is not None and epoch == last_epoch + 1 and 0 <= time.monotonic() - ended < WINDOW_SECONDS:
                     rows = [[pid, process_name(pid, uid), *values] for pid, values in counts.items()]
-                    publish({"ended": ended, "seconds": WINDOW_SECONDS, "rows": rows}, uid)
+                    publish({"ended": ended, "seconds": WINDOW_SECONDS, "rows": [
+                        row[:4] for row in rows
+                    ], "packets": [[*row[:2], *row[4:]] for row in rows]}, uid)
                     if not announced:
                         notify_ready()
                         announced = True

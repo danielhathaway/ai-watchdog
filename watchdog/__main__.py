@@ -1,9 +1,13 @@
 import argparse
+import json
+import sqlite3
+import subprocess
 import logging
 import os
 import secrets
 import signal
 import tempfile
+import time
 from pathlib import Path
 
 from .common import BASELINE, CONFIG, MONITOR_RUNTIME, configuration, write_json
@@ -48,6 +52,24 @@ def main():
     ):
         observe = actions.add_parser(name, help=help_text)
         observe.add_argument("--directory", type=Path, required=True)
+    vulnerability = actions.add_parser("vulnerabilities", help="Inspect local exposure and passive evidence")
+    vulnerability.add_argument("--directory", type=Path, default=MONITOR_STATE,
+                               help="Monitor state directory, such as .watchdog in observe mode")
+    operations = vulnerability.add_subparsers(dest="operation", required=True)
+    refresh = operations.add_parser("refresh", help="Match public advisories to the installed inventory")
+    refresh.add_argument("--ubuntu-archive", type=Path, help="Use a local copy of Canonical's OSV archive")
+    refresh.add_argument("--watchdog-advisories", type=Path, help="Trusted first-party advisory manifest")
+    listing = operations.add_parser("list", help="List saved findings")
+    listing.add_argument("--all", action="store_true", help="Include findings outside the affected range")
+    updates = operations.add_parser("updates", help="Check local APT candidates and manifest releases")
+    evidence = operations.add_parser("evidence", help="Match reviewed indicators to recorded events")
+    evidence.add_argument("--rules", type=Path, help="Trusted local passive indicator rules")
+    evidence.add_argument("--hours", type=int, default=24)
+    for operation in (listing, updates, evidence):
+        operation.add_argument("--advisory", help="Limit results to this CVE or Watchdog advisory ID")
+        operation.add_argument("--limit", type=int, default=100, help="Maximum rows to return (0 for all)")
+    for operation in (listing, updates):
+        operation.add_argument("--scope", choices=("os", "dependency", "watchdog"))
     actions.add_parser("supervise", help="Start the independent containment watchdog")
     actions.add_parser("baseline", help="Record a known-good integrity baseline")
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
@@ -60,6 +82,61 @@ def main():
         with tempfile.TemporaryDirectory(prefix="ai-watchdog-") as directory:
             state = Path(directory)
             serve({"port": args.port, "interval": 10, "ollama_model": ""}, state, state, demo=True)
+        return
+    if args.command == "vulnerabilities":
+        from . import store, vulnerabilities
+
+        database = args.directory / "monitor.sqlite3"
+        try:
+            if args.operation == "refresh":
+                store.initialize(database)
+                default_manifest = args.directory / "watchdog-advisories.json"
+                manifest = args.watchdog_advisories or (default_manifest if default_manifest.is_file() else None)
+                report = vulnerabilities.refresh(database, archive=args.ubuntu_archive, manifest=manifest)
+                result = {key: value for key, value in report.items() if key != "findings"}
+                result["unresolved"] = len(vulnerabilities.unresolved(report))
+                print(json.dumps(result, indent=2))
+                if report["errors"]:
+                    raise SystemExit(1)
+                return
+            if not database.is_file():
+                parser.error("Monitor database is missing. Check --directory.")
+            with store.connect(database) as db:
+                report = store.property_get(db, "vulnerabilities", {})
+                result = {key: value for key, value in report.items() if key != "findings"}
+                result["status"] = "recorded" if report else "not-checked"
+                if not 0 <= args.limit <= 10000:
+                    parser.error("--limit must be between 0 and 10000")
+                limit = args.limit or None
+                if args.advisory and not vulnerabilities.ADVISORY_ID.fullmatch(args.advisory):
+                    parser.error("--advisory must be a CVE or Watchdog advisory ID")
+                if args.operation == "evidence":
+                    if not 1 <= args.hours <= 24 * 365:
+                        parser.error("--hours must be between 1 and 8760")
+                    default_rules = args.directory / "vulnerability-rules.json"
+                    rules = args.rules or (default_rules if default_rules.is_file() else None)
+                    evidence = vulnerabilities.evidence(db, report, rules, args.hours, args.advisory)
+                    rows = evidence["advisories"]
+                    statuses = {row["status"] for row in rows}
+                    result["evidence_counts"] = {status: sum(row["status"] == status for row in rows)
+                                                 for status in sorted(statuses)}
+                    result["since"] = evidence["since"]
+                    priority = {"signals-found": 0, "partial-log-coverage": 1, "no-matching-events": 2, "no-rule": 3}
+                    result["advisories"] = sorted(rows, key=lambda row: (priority[row["status"]], row["advisory"]))[:limit]
+                else:
+                    rows = vulnerabilities.select_findings(report, include_all=getattr(args, "all", False),
+                                                            advisory=args.advisory, scope=args.scope)
+                    result["matching_findings"] = len(rows)
+                    if args.operation == "updates":
+                        rows = vulnerabilities.updates(report, rows)
+                        rows.sort(key=lambda row: (row["update_available"] is not True,
+                                                  row["candidate_meets_fix_threshold"] is not True))
+                        result["available_updates"] = sum(row["update_available"] is True for row in rows)
+                        result["candidate_checked_at"] = time.time()
+                    result["findings"] = rows[:limit]
+                print(json.dumps(result, indent=2))
+        except (OSError, KeyError, ValueError, TypeError, sqlite3.Error, subprocess.SubprocessError) as error:
+            parser.exit(1, f"Vulnerability check failed: {error}\n")
         return
     settings = configuration(args.config)
     if args.command == "serve":

@@ -57,31 +57,36 @@ def select_uplinks(names):
     return {"method": "unavailable", "uplinks": []}
 
 
-def traffic(previous, at, previous_at, interval):
+def interface_counters():
     counters = {}
     for line in Path("/proc/net/dev").read_text().splitlines()[2:]:
         name, _, data = line.rpartition(":")
         fields = data.split()
         if name.strip() != "lo" and len(fields) >= 16:
-            counters[name.strip()] = (int(fields[0]), int(fields[8]))
-    elapsed = at - previous_at
+            counters[name.strip()] = tuple(int(fields[index]) for index in (0, 8, 1, 9))
+    return counters
+
+
+def interface_rates(previous, counters, seconds):
     basis = select_uplinks(counters.keys())
     included = set(basis["uplinks"])
     rates = []
-    for name, (rx, tx) in sorted(counters.items()):
-        rx_rate = tx_rate = None
-        if name in previous and 0 < elapsed <= 3 * interval:
-            old_rx, old_tx = previous[name]
-            rx_rate = (rx - old_rx) / elapsed if rx >= old_rx else None
-            tx_rate = (tx - old_tx) / elapsed if tx >= old_tx else None
-        rates.append({"name": name, "counted": name in included, "rx": rx_rate, "tx": tx_rate})
+    for name, values in sorted(counters.items()):
+        deltas = [None] * 4
+        if seconds and name in previous:
+            deltas = [value - old if value >= old else None for value, old in zip(values, previous[name])]
+        rx, tx, rx_packets, tx_packets = deltas
+        rates.append({
+            "name": name, "counted": name in included,
+            "rx": rx / seconds if rx is not None else None,
+            "tx": tx / seconds if tx is not None else None,
+            "rx_packets": rx_packets, "tx_packets": tx_packets,
+        })
     totals = []
     for metric in ("rx", "tx"):
         observed = [interface[metric] for interface in rates if interface["counted"]]
         totals.append(sum(observed) if observed and None not in observed else None)
-    return counters, *totals, {
-        **basis, "interfaces": rates, "window_seconds": round(elapsed, 3) if previous and 0 < elapsed <= 3 * interval else None,
-    }
+    return {**basis, "interfaces": rates, "rx": totals[0], "tx": totals[1]}
 
 
 def sockets():

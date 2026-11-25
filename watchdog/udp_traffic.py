@@ -7,6 +7,7 @@ from .common import uptime
 
 SNAPSHOT = Path(f"/run/ai-watchdog-udp-{os.geteuid()}/snapshot.json")
 MAX_SIZE = 262144
+BUCKET_SECONDS = 5
 
 
 def read_snapshot(path=SNAPSHOT):
@@ -22,17 +23,25 @@ def read_snapshot(path=SNAPSHOT):
         data = json.loads(stream.read(MAX_SIZE + 1))
 
     ended, seconds, rows = data["ended"], data["seconds"], data["rows"]
-    if type(ended) is not int or type(seconds) is not int or seconds != 5:
+    if type(ended) is not int or type(seconds) is not int or seconds != BUCKET_SECONDS:
         raise ValueError("Invalid UDP sampling window")
     if not ended <= uptime() < ended + 3 * seconds:
         return {"state": "stale"}
+    rates = {key: (rx / seconds, tx / seconds) for key, (rx, tx) in counter_rows(rows).items()}
+    snapshot = {"state": "ready", "ended": ended, "rates": rates}
+    if "packets" in data:
+        snapshot["packets"] = counter_rows(data["packets"])
+    return snapshot
+
+
+def counter_rows(rows):
     if not isinstance(rows, list) or len(rows) > 1024:
         raise ValueError("Invalid UDP process count")
-    rates = {}
+    counters = {}
     for pid, name, rx, tx in rows:
         if (type(pid) is not int or not 0 < pid < 2**32 or not isinstance(name, str)
-                or not 0 < len(name) <= 64 or not name.isprintable() or (pid, name) in rates
+                or not 0 < len(name) <= 64 or not name.isprintable() or (pid, name) in counters
                 or any(type(value) is not int or not 0 <= value < 2**64 for value in (rx, tx))):
             raise ValueError("Invalid UDP process reading")
-        rates[pid, name] = (rx / seconds, tx / seconds)
-    return {"state": "ready", "rates": rates}
+        counters[pid, name] = (rx, tx)
+    return counters
