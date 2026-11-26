@@ -132,6 +132,28 @@ python3 -m watchdog baseline --directory .watchdog
 
 The system installation records a root-owned Watchdog baseline with the existing `sudo python3 -B -m watchdog baseline` command. The baseline covers application code, dashboard assets, active configuration, service unit files and their local overrides, and installed UDP probe files when present. After an intentional update, review the files and use `sudo python3 -B -m watchdog baseline --watchdog-only` to refresh just the application baseline on system installations. The observe-only account owns its baseline, so a compromise of that account can affect what the checks report. Host-local checks also depend on the integrity of the running kernel.
 
+### Optional Wi-Fi-only GNOME discovery
+
+On Ubuntu systems with the `wsdd` package, an enforced `/usr/bin/wsdd` AppArmor profile, and GNOME’s `wsdd` backend, find your Wi-Fi interface with `ip -brief link`. From a trusted checkout run the following, replacing `wlp5s0` with that interface.
+
+```sh
+sudo ./deploy/install-wsdd-wifi.sh install wlp5s0
+```
+
+The installer registers a local dpkg diversion so package updates install the vendor executable at `/usr/bin/wsdd.distrib`. It installs a launcher at `/usr/bin/wsdd` and adds one marked rule granting read access to that vendor file. The launcher binds discovery sockets to the Wi-Fi device and preserves the packaged behavior for other invocations. It refuses an unmanaged diversion or rule. Existing discovery processes pick up the launcher at their next start. Sign out and back in to restart the GNOME discovery session, then reopen **Network** in Files.
+
+After a `wsdd` or AppArmor update, run the check below. It verifies the diversion, launcher hash, vendor file, exact read rule, enforced profile, and packaged program startup. Watchdog also checks the installed files on its scheduled health cadence and reports any drift in **Sensors**. If an update replaced the profile and the original layout is still supported, rerun `install` with the same interface to restore the managed rule. Review any compatibility error before rerunning the installer.
+
+```sh
+sudo ./deploy/install-wsdd-wifi.sh check
+```
+
+To roll back, run the command below, then sign out and back in before reopening Network in Files. Rollback restores the current package executable from its diverted path and removes the installer’s marked AppArmor rule. This restores the package’s default discovery scope, which can include VPN and Docker interfaces.
+
+```sh
+sudo ./deploy/install-wsdd-wifi.sh rollback
+```
+
 ### Email alerts
 
 Add an `email_alerts` object to the active configuration file. For the user installation this is `.watchdog/config.json`. For the system installation it is `/etc/ai-watchdog/config.json`. The default value `null` keeps delivery off.

@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import multicast, store
+from . import multicast, store, wsdd_policy
 from .common import BOOT_ID, execute, uptime, write_json
 from .process_traffic import SS
 from .responder import heartbeat
@@ -120,7 +120,7 @@ def health(monitor):
                 insecure.append(item.name)
         except OSError:
             missing.append(item.name)
-    return [
+    checks = [
         result("heartbeat", "Monitor heartbeat", "pass" if fresh else "fail",
                "A current heartbeat was published." if fresh else "The monitor heartbeat is missing or stale."),
         result("supervisor", "Independent supervisor", "pass" if alive and observing else "fail",
@@ -133,6 +133,18 @@ def health(monitor):
                "The state directory, database, and access token are private."),
         integrity(monitor.baseline.with_name("watchdog-integrity.json"), monitor.config, monitor.observe_directory),
     ]
+    try:
+        data = wsdd_policy.manifest()
+        issues = wsdd_policy.check_files(data)
+        checks.append(result("wsdd-policy", "Wi-Fi discovery policy", "fail" if issues else "pass",
+                             ". ".join(issues) if issues else
+                             f"Launcher, diversion, and on-disk AppArmor rule match for {data['interface']}."))
+    except FileNotFoundError:
+        pass
+    except PROBE_ERRORS:
+        checks.append(result("wsdd-policy", "Wi-Fi discovery policy", "unknown",
+                             "The installed policy could not be checked. Run the installer check as root."))
+    return checks
 
 
 LISTENER_INVENTORY_VERSION = 4
