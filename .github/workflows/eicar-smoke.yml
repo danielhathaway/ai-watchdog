@@ -12,6 +12,7 @@ on:
       - 'watchdog/__main__.py'
       - 'watchdog/common.py'
       - 'watchdog/monitor.py'
+      - 'watchdog/reviews.py'
       - 'watchdog/system_checks.py'
       - 'watchdog/server.py'
       - 'watchdog/store.py'
@@ -29,9 +30,13 @@ permissions:
 
 jobs:
   smoke:
-    name: Install Watchdog and detect EICAR in Ubuntu
+    name: Watchdog EICAR smoke test (${{ matrix.mode }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 28
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [desktop, desktop-upgrade, system-upgrade]
     defaults:
       run:
         shell: bash
@@ -39,6 +44,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Install VM tools
         run: |
@@ -56,8 +62,10 @@ jobs:
           awk '$2 ~ /(^|\*)ubuntu-24\.04-server-cloudimg-amd64\.img$/' SHA256SUMS | sha256sum --check -
 
       - name: Run the EICAR smoke test
+        env:
+          SMOKE_MODE: ${{ matrix.mode }}
         run: |
           if [[ -x ${GECKOWEBDRIVER:-}/geckodriver ]]; then
             export WATCHDOG_GECKODRIVER="$GECKOWEBDRIVER/geckodriver"
           fi
-          bash tests/smoke/eicar_vm.sh "$RUNNER_TEMP/ubuntu-24.04-server-cloudimg-amd64.img"
+          bash tests/smoke/eicar_vm.sh "$RUNNER_TEMP/ubuntu-24.04-server-cloudimg-amd64.img" "$SMOKE_MODE"

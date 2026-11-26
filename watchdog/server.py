@@ -2,13 +2,14 @@ import hmac
 import http.client
 import json
 import logging
+import re
 import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from . import analysis, notifications, schedule, store, system_checks, vulnerabilities
+from . import analysis, notifications, reviews, schedule, store, system_checks, vulnerabilities
 
 STATIC = Path(__file__).with_name("static")
 ASSETS = {
@@ -192,6 +193,7 @@ class Handler(BaseHTTPRequestHandler):
                 data["email"] = notifications.status(db)
                 data["vulnerabilities"] = vulnerabilities.summary(db)
                 data["system_checks"] = system_checks.read(db, monitor.settings)
+                reviews.annotate(db, data["events"], data["system_checks"].get("antivirus"))
             if monitor.antivirus:
                 report = data["system_checks"]["antivirus"]
                 data["system_checks"]["antivirus"] = monitor.antivirus.status(report, now)
@@ -206,10 +208,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized(mutation=True):
             return
-        if self.path not in {"/api/check", "/api/antivirus/scan"}:
+        review = re.fullmatch(r"/api/alerts/([1-9][0-9]{0,17})/(acknowledge|resolve)", self.path)
+        if not review and self.path not in {"/api/check", "/api/antivirus/scan"}:
             self.reply(404, {"error": "Not found"})
         elif self.headers.get("Content-Length", "0") != "0" or self.headers.get("Transfer-Encoding"):
             self.reply(400, {"error": "Unexpected body"})
+        elif review:
+            self.review_finding(int(review[1]), review[2])
         elif not self.server.monitor.ready.is_set():
             self.reply(503, {"error": "Monitoring is starting"})
         elif self.path == "/api/antivirus/scan":
@@ -224,6 +229,18 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(202, {"status": "running"})
         else:
             self.reply(429, {"error": "A check is running or was started recently"})
+
+    def review_finding(self, event_id, action):
+        monitor = self.server.monitor
+        try:
+            with store.connect(monitor.database) as db:
+                db.execute("BEGIN IMMEDIATE")
+                report = system_checks.read(db, monitor.settings).get("antivirus")
+                review = reviews.update(db, event_id, time.time(), action, report)
+        except reviews.ReviewConflict as error:
+            self.reply(409, {"error": str(error)})
+        else:
+            self.reply(200, review) if review else self.reply(404, {"error": "Finding not found"})
 
     def do_PUT(self):
         if not self.authorized(mutation=True):

@@ -149,6 +149,8 @@ Restart the monitor to apply the settings. The first scan runs shortly after the
 
 Open **Sensors → Antivirus** for readiness, daily signature age, scan paths, and the next and latest scan times. **Scan now** uses the same worker and paths as scheduled scans. Watchdog runs one scan at a time and schedules the next one from the latest result. Incomplete scans retry after five minutes. A clean rescan updates Sensors and keeps earlier detections in **Activity** under the usual retention policy. Detections are high-severity events and use the existing email settings.
 
+In **Activity**, use **Acknowledge** to record that you reviewed a malware finding. After a newer scan of the same configured paths finishes clean and scans at least one file, use **Resolve with clean scan** to link that result to the finding. The original alert, scan timestamp, and scan summary remain visible until the alert expires. Older findings recorded before Watchdog saved the scan paths can be acknowledged.
+
 Scans run locally under the monitor account and time out after 15 minutes. ClamAV uses official signatures, and Watchdog reports an incomplete scan if the signatures are missing or older than seven days. Directory scans skip symlinks and nested mounts and are subject to ClamAV's file and archive limits. Watchdog reports findings and leaves the files in place. [ClamAV scanning documentation](https://docs.clamav.net/manual/Usage/Scanning.html)
 
 ### Optional Wi-Fi-only GNOME discovery
@@ -280,9 +282,13 @@ Run the antivirus smoke test on an x86-64 Linux host with QEMU, OVMF, xorriso, O
 
 ```sh
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img
+bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img desktop-upgrade
+bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img system-upgrade
 ```
 
-Each run creates a disposable disk overlay, runs the desktop user installer, and verifies that FreshClam is enabled and downloads signatures. The test checks in headless Firefox that a scheduled scan produces a high-severity EICAR alert in **Activity**, then removes the test file and uses **Scan now** to verify a clean result and a retained detection alert. The runner uses a loopback-only SSH tunnel for dashboard access and discards the guest and its test data afterward. A successful run prints `WATCHDOG_EICAR_VM_PASS`. The Firefox executable overrides above also apply to this test. Set `WATCHDOG_OVMF_CODE` and `WATCHDOG_OVMF_VARS` if OVMF is installed outside `/usr/share/OVMF`.
+Each run creates a disposable disk overlay and verifies that FreshClam is enabled and downloads signatures. The Firefox test acknowledges an EICAR alert, runs a clean scan after the sample is removed, and resolves the original finding with the linked result. The upgrade modes use the pre-review commit `ae1fe37` from Git history and verify that rerunning the installer preserves configuration, the last scan, and the original alert. The system-wide mode also exercises home-directory restrictions, unreadable paths, and recovery from stale signatures using the disposable guest clock.
+
+The runner uses a loopback-only SSH tunnel for dashboard access and discards the guest and its test data afterward. A successful run prints `WATCHDOG_EICAR_VM_PASS`. The Firefox executable overrides above also apply to this test. Set `WATCHDOG_OVMF_CODE` and `WATCHDOG_OVMF_VARS` if OVMF is installed outside `/usr/share/OVMF`.
 
 GitHub Actions runs the EICAR smoke test on pull requests and pushes to `main` that touch the installers, antivirus integration, or smoke test. The workflow also supports manual runs from the Actions tab.
 

@@ -319,12 +319,14 @@ function renderProcessTraffic(traffic) {
 
 function eventList(id, records) {
   const container = get(id);
-  const eventKey = records.map(({id, at}) => `${id}:${at}`).join(",");
+  const eventKey = records.map(({id, at, review}) =>
+    JSON.stringify([id, at, review?.acknowledged_at, review?.resolved_at, review?.can_resolve])).join(",");
   if (container.dataset.eventKey === eventKey) return;
   container.dataset.eventKey = eventKey;
   const openItems = new Set(Array.from(container.querySelectorAll("details[open]"), (item) => item.dataset.event));
   const items = records.map((record) => {
     const item = element("li");
+    item.dataset.eventId = record.id;
     const label = record.severity[0].toUpperCase() + record.severity.slice(1);
     const status = element("span", null, "dot " + ({critical: "bad", high: "bad", medium: "warning", info: "good"}[record.severity] || ""));
     status.title = label;
@@ -334,6 +336,7 @@ function eventList(id, records) {
     description.append(element("strong", record.title));
     const details = [record.subject, record.detail].filter(Boolean).join(" · ");
     if (details) description.append(element("small", details));
+    if (id === "all-events" && record.review) description.append(findingReview(record));
     if (record.kind === "anomaly" && ["rx", "tx"].includes(record.subject)) {
       description.append(spikeAttribution(record, openItems.has(String(record.id))));
     }
@@ -343,6 +346,41 @@ function eventList(id, records) {
     return item;
   });
   container.replaceChildren(...(items.length ? items : [element("li", "No matching events.", "empty")]));
+}
+
+function findingReview({id, review}) {
+  const panel = element("div", null, "finding-review");
+  if (review.resolved_at) {
+    panel.append(element("small", `Resolved ${fullDate(review.resolved_at)} · Clean scan ${fullDate(review.evidence_at)} · ${review.evidence_detail}`));
+    return panel;
+  }
+  if (review.acknowledged_at) {
+    panel.append(element("small", `Acknowledged ${fullDate(review.acknowledged_at)}`));
+    if (!review.can_resolve) {
+      panel.append(element("small", review.scope_recorded
+        ? "A clean rescan of the same paths is required to resolve this finding."
+        : "Scan paths were unavailable when this finding was recorded."));
+      return panel;
+    }
+  }
+  const action = review.acknowledged_at ? "resolve" : "acknowledge";
+  const button = element("button", action === "resolve" ? "Resolve with clean scan" : "Acknowledge", "text-button");
+  button.type = "button";
+  button.addEventListener("click", async () => {
+    const before = generation;
+    button.disabled = true;
+    announce("");
+    try {
+      await api(`/api/alerts/${id}/${action}`, "POST");
+    } catch (error) {
+      if (before === generation) announce(error.message);
+    } finally {
+      button.disabled = false;
+      if (before === generation) await refresh();
+    }
+  });
+  panel.append(button);
+  return panel;
 }
 
 function filterEvents() {

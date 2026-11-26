@@ -124,6 +124,57 @@ class ConsoleIntegrationTests(unittest.TestCase):
             self.assertTrue(status["running"])
             self.assertEqual(["/downloads"], status["paths"])
 
+    def test_alert_review_records_clean_evidence_without_changing_the_detection(self):
+        paths = ["/downloads"]
+        detection = system_checks.result("clamav", "ClamAV malware scan", "fail", "EICAR detected")
+        clean = {**system_checks.result("clamav", "ClamAV malware scan", "pass", "One file scanned."),
+                 "files_scanned": 1}
+        now = time.time()
+        with running_console(self.database, workers=False) as console:
+            system_checks.save(self.database, "antivirus", now - 5, [detection], paths=paths)
+            console.monitor.settings["antivirus_paths"] = paths
+            _, status, _ = request(console, "GET", "/api/status")
+            original, = status["events"]
+            endpoint = f"/api/alerts/{original['id']}"
+            ack = endpoint + "/acknowledge"
+            resolve = endpoint + "/resolve"
+            self.assertEqual(401, request(console, "POST", ack, authorized=False)[0])
+            self.assertEqual(403, request(console, "POST", ack, headers={"Origin": "http://other.test"})[0])
+            self.assertEqual(400, request(console, "POST", ack, body=b"{}")[0])
+            self.assertEqual(404, request(console, "POST", "/api/alerts/999/acknowledge")[0])
+            self.assertEqual(409, request(console, "POST", resolve)[0])
+            code, acknowledged, _ = request(console, "POST", ack)
+            self.assertEqual(200, code)
+            self.assertIsNotNone(acknowledged["acknowledged_at"])
+            self.assertEqual(acknowledged, request(console, "POST", ack)[1])
+
+            for report, scope in ((clean, ["/other"]), ({**clean, "files_scanned": 0}, paths)):
+                system_checks.save(self.database, "antivirus", now - 3, [report], paths=scope)
+                self.assertEqual(409, request(console, "POST", resolve)[0])
+            system_checks.save(self.database, "antivirus", now - 1, [clean], paths=paths)
+            code, resolved, _ = request(console, "POST", resolve)
+            self.assertEqual(200, code)
+            self.assertEqual(now - 1, resolved["evidence_at"])
+            self.assertEqual(clean["detail"], resolved["evidence_detail"])
+            system_checks.save(self.database, "antivirus", now, [detection], paths=paths)
+            self.assertEqual(resolved, request(console, "POST", resolve)[1])
+            _, status, _ = request(console, "GET", "/api/status")
+            retained, = [event for event in status["events"] if event["id"] == original["id"]]
+            self.assertEqual({**original, "review": resolved}, retained)
+
+            with store.connect(self.database) as db:
+                older = store.event(db, now - 10, "high", "system-check", "ClamAV detected malware",
+                                    "Older detection without a saved scope", "antivirus/clamav")
+            system_checks.save(self.database, "antivirus", now + 1, [clean], paths=paths)
+            code, review, _ = request(console, "POST", f"/api/alerts/{older}/acknowledge")
+            self.assertEqual(200, code)
+            self.assertFalse(review["scope_recorded"])
+            self.assertEqual(409, request(console, "POST", f"/api/alerts/{older}/resolve")[0])
+
+        with store.connect(self.database) as db:
+            store.expire(db, now + 86401, 1)
+            self.assertEqual(0, db.execute("SELECT count(*) FROM finding_reviews").fetchone()[0])
+
     def test_scheduler_fires_overdue_check_after_reopening_the_database(self):
         with running_console(self.database, workers=False) as console:
             self.assertEqual(403, request(console, "PUT", "/api/schedule", body=b'{"interval_minutes":5}',

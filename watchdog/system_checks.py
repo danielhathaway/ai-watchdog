@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import multicast, store, wsdd_policy
+from . import multicast, reviews, store, wsdd_policy
 from .common import BOOT_ID, execute, uptime, write_json
 from .process_traffic import SS
 from .responder import heartbeat
@@ -487,7 +487,9 @@ def save(database, group, now, rows, *, paths=None):
         before = {row["id"]: row for row in saved.get(group, {}).get("checks", [])}
         for row in rows:
             previous = before.get(row["id"], {})
-            if (row["status"], row["detail"]) == (previous.get("status"), previous.get("detail")):
+            detection = group == "antivirus" and row["status"] == "fail"
+            scope_changed = detection and paths != saved.get(group, {}).get("paths")
+            if not scope_changed and (row["status"], row["detail"]) == (previous.get("status"), previous.get("detail")):
                 continue
             if row["status"] in {"fail", "warn"}:
                 severity = "high" if row["status"] == "fail" else "medium"
@@ -495,9 +497,10 @@ def save(database, group, now, rows, *, paths=None):
                 severity = "info"
             else:
                 continue
-            title = ("ClamAV detected malware" if group == "antivirus" and row["status"] == "fail"
-                     else f'{row["name"]}: {row["status"]}')
-            store.event(db, now, severity, "system-check", title, row["detail"], f'{group}/{row["id"]}')
+            title = "ClamAV detected malware" if detection else f'{row["name"]}: {row["status"]}'
+            event_id = store.event(db, now, severity, "system-check", title, row["detail"], f'{group}/{row["id"]}')
+            if detection and paths:
+                reviews.record_scope(db, event_id, paths)
         if group == "hardening":
             for row in rows:
                 if row["id"] == "ports" and "listeners" in row:

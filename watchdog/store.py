@@ -14,6 +14,10 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS event_topic ON events(kind, subject, at);
 CREATE INDEX IF NOT EXISTS event_time ON events(at);
+CREATE TABLE IF NOT EXISTS finding_reviews (
+    event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    paths TEXT, acknowledged_at REAL, resolved_at REAL, evidence_at REAL, evidence_detail TEXT
+);
 CREATE TABLE IF NOT EXISTS traffic_attribution (
     event_id INTEGER PRIMARY KEY, at REAL NOT NULL, snapshot TEXT NOT NULL
 );
@@ -43,6 +47,7 @@ CREATE INDEX IF NOT EXISTS email_outbox_time ON email_outbox(at);
 def connect(path):
     with closing(sqlite3.connect(path, timeout=3)) as database:
         database.row_factory = sqlite3.Row
+        database.execute("PRAGMA foreign_keys=ON")
         with database:
             yield database
 
