@@ -19,6 +19,9 @@ let scheduleEdited = false;
 let findingCursors = [null];
 let nextFindingCursor = null;
 let findingRequest = 0;
+let historyRequest = 0;
+let historyCursor = null;
+let historyLatest = null;
 
 function announce(message) {
   get("error").hidden = !message;
@@ -597,19 +600,60 @@ function renderAntivirus(report) {
   get("antivirus-checks").replaceChildren(result);
   const coverage = scan?.coverage ?? [];
   get("antivirus-coverage").hidden = !coverage.length;
-  get("antivirus-path-results").replaceChildren(...coverage.map((path) => {
-    const row = element("div");
-    const detail = element("dd");
-    const counts = [];
-    if (path.files_scanned != null) counts.push(`Files counted by ClamAV: ${number.format(path.files_scanned)}`);
-    if (path.access_errors) counts.push(`Access errors: ${number.format(path.access_errors)}`);
-    if (path.scan_errors) counts.push(`Scan errors: ${number.format(path.scan_errors)}`);
-    if (path.limit_hits) counts.push(`File or archive limit hits: ${number.format(path.limit_hits)}`);
-    detail.append(element("strong", outcomes[path.status], style[path.status]), element("span", path.detail));
-    if (counts.length) detail.append(element("span", counts.join(" · ")));
-    row.append(element("dt", path.path), detail);
-    return row;
-  }));
+  get("antivirus-path-results").replaceChildren(...coverage.map(coverageRow));
+  if (get("antivirus-history").open && report.at !== historyLatest) {
+    historyLatest = report.at;
+    loadAntivirusHistory();
+  }
+}
+
+function coverageRow(path) {
+  const outcomes = {pass: "Clean", fail: "Detection", warn: "Incomplete scan", skipped: "No files scanned"};
+  const style = {pass: "good-text", fail: "bad-text", warn: "warning-text"};
+  const row = element("div");
+  const detail = element("dd");
+  const counts = [];
+  if (path.files_scanned != null) counts.push(`Files counted by ClamAV: ${number.format(path.files_scanned)}`);
+  if (path.access_errors) counts.push(`Access errors: ${number.format(path.access_errors)}`);
+  if (path.scan_errors) counts.push(`Scan errors: ${number.format(path.scan_errors)}`);
+  if (path.limit_hits) counts.push(`File or archive limit hits: ${number.format(path.limit_hits)}`);
+  if (path.duration_seconds != null) {
+    counts.push(`Elapsed: ${path.duration_seconds.toLocaleString([], {maximumFractionDigits: 3})} s`);
+  }
+  detail.append(element("strong", outcomes[path.status], style[path.status]), element("span", path.detail));
+  if (counts.length) detail.append(element("span", counts.join(" · ")));
+  const label = element("dt", path.path);
+  if (path.at != null) label.append(element("small", ` · ${fullDate(path.at)}`));
+  row.append(label, detail);
+  return row;
+}
+
+async function loadAntivirusHistory(older = false) {
+  const before = generation;
+  const request = ++historyRequest;
+  const select = get("history-path");
+  const path = select.value;
+  const query = new URLSearchParams();
+  if (path) query.set("path", path);
+  if (older && historyCursor != null) query.set("before", historyCursor);
+  get("history-older").disabled = true;
+  try {
+    const history = await api("/api/antivirus/history?" + query);
+    if (before !== generation || request !== historyRequest) return;
+    historyCursor = history.next_before;
+    const allPaths = new Set([...history.paths, ...(path ? [path] : [])]);
+    select.replaceChildren(new Option("All paths", ""), ...[...allPaths].map((value) => new Option(value, value)));
+    select.value = path;
+    const rows = history.results.map(coverageRow);
+    if (older) get("history-results").append(...rows);
+    else get("history-results").replaceChildren(...rows);
+    text("history-status", get("history-results").children.length ? "" : "No coverage history for this selection.");
+    get("history-older").hidden = historyCursor == null;
+  } catch (error) {
+    if (before === generation && request === historyRequest) text("history-status", error.message);
+  } finally {
+    if (before === generation && request === historyRequest) get("history-older").disabled = false;
+  }
 }
 
 function renderSettings() {
@@ -645,6 +689,13 @@ function lock(showError = false) {
   feedback("");
   token = "";
   snapshot = null;
+  get("antivirus-history").open = false;
+  get("history-results").replaceChildren();
+  get("history-path").replaceChildren(new Option("All paths", ""));
+  get("history-older").hidden = true;
+  text("history-status", "");
+  historyCursor = null;
+  historyLatest = null;
   findingCursors = [null];
   nextFindingCursor = null;
   get("finding-status").value = "open";
@@ -755,6 +806,14 @@ get("schedule-form").addEventListener("submit", async (event) => {
   }
 });
 get("severity").addEventListener("change", filterEvents);
+get("antivirus-history").addEventListener("toggle", () => {
+  if (get("antivirus-history").open && snapshot) {
+    historyLatest = snapshot.system_checks?.antivirus?.at;
+    loadAntivirusHistory();
+  }
+});
+get("history-path").addEventListener("change", () => loadAntivirusHistory());
+get("history-older").addEventListener("click", () => loadAntivirusHistory(true));
 get("finding-status").addEventListener("change", () => {
   findingCursors = [null];
   changeFindingsPage();

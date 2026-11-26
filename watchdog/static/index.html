@@ -137,6 +137,15 @@
             <dl id="antivirus-path-results" class="check-results"></dl>
           </details>
         </section>
+        <details class="panel interface-detail" id="antivirus-history">
+          <summary>Antivirus coverage history</summary>
+          <div class="panel-head">
+            <label>Scan path <select id="history-path"><option value="">All paths</option></select></label>
+          </div>
+          <p id="history-status" class="history-status" role="status"></p>
+          <dl id="history-results" class="check-results"></dl>
+          <div class="finding-pager"><button type="button" id="history-older" class="text-button" hidden>Load older results</button></div>
+        </details>
         <div class="panel">
           <div class="panel-head"><h2>Known vulnerabilities</h2></div>
           <dl id="vulnerability-status"></dl>

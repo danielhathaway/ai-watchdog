@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from watchdog import store
+from watchdog import store, system_checks
 
 
 class StorageLifecycleTests(unittest.TestCase):
@@ -44,3 +44,16 @@ class StorageLifecycleTests(unittest.TestCase):
             for table in ("samples", "events", "traffic_attribution", "interface_spikes"):
                 with self.subTest(table=table):
                     self.assertEqual([90_000], [row[0] for row in db.execute(f"SELECT at FROM {table}")])
+
+    def test_antivirus_history_records_repeated_results_and_retains_old_paths_until_expiry(self):
+        row = system_checks.result("clamav", "ClamAV malware scan", "pass", "Clean scan")
+        for at, path in ((100, "/old"), (90_000, "/current"), (95_000, "/current")):
+            coverage = {"path": path, "status": "pass", "files_scanned": 1, "duration_seconds": 2.25}
+            system_checks.save(self.database, "antivirus", at, [{**row, "coverage": [coverage]}], paths=[path])
+        with store.connect(self.database) as db:
+            history = store.antivirus_history(db, None, None)
+            self.assertEqual(["/current", "/old"], history["paths"])
+            self.assertEqual([95_000, 90_000, 100], [result["at"] for result in history["results"]])
+            self.assertEqual(2.25, history["results"][0]["duration_seconds"])
+            store.expire(db, 100_000, 1)
+            self.assertEqual(["/current"], store.antivirus_history(db, None, None)["paths"])

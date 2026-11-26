@@ -31,6 +31,9 @@ cleanup() {
         wait "$vm" 2>/dev/null || true
     fi
     if (( status != 0 )); then
+        if [[ -s $work/guest.log ]]; then
+            grep -aE 'WATCHDOG_EICAR_|Rollback failed:' "$work/guest.log" >&2 || true
+        fi
         for log in guest.log qemu.log geckodriver.log; do
             if [[ -s $work/$log ]]; then
                 echo "Last lines of $log" >&2
@@ -60,7 +63,7 @@ sources=(LICENSE deploy/install-user.sh deploy/install.sh deploy/install-clamav.
 tar -C "$repo" --exclude=__pycache__ -czf "$work/source.tgz" "${sources[@]}"
 if [[ $mode != desktop ]]; then
     # Last release before alert-review metadata was added.
-    git -C "$repo" archive --format=tar.gz ae1fe37ad4a4b3f85e5a95c5f32d091e02be624c "${sources[@]}" >"$work/legacy.tgz"
+    git -C "$repo" -c tar.umask=0022 archive --format=tar.gz ae1fe37ad4a4b3f85e5a95c5f32d091e02be624c "${sources[@]}" >"$work/legacy.tgz"
 fi
 python3 - "$work" "$smoke/eicar_guest.py" "$dashboard_port" "$mode" <<'PY'
 import base64

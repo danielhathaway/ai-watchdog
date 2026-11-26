@@ -495,7 +495,12 @@ def antivirus_path(path, timeout):
 
 def antivirus(paths):
     deadline = time.monotonic() + ANTIVIRUS_TIMEOUT
-    coverage = [antivirus_path(path, deadline - time.monotonic()) for path in paths]
+    coverage = []
+    for path in paths:
+        started = time.monotonic()
+        remaining = deadline - started
+        row = antivirus_path(path, remaining)
+        coverage.append({**row, "duration_seconds": round(time.monotonic() - started, 3) if remaining > 0 else None})
     detections = [row for row in coverage if row["status"] == "fail"]
     incomplete = [row for row in coverage if row["status"] == "warn"]
     scanned = [row["files_scanned"] for row in coverage if row["files_scanned"] is not None]
@@ -536,6 +541,8 @@ def save(database, group, now, rows, *, paths=None):
         saved = store.property_get(db, "system_checks", {})
         before = {row["id"]: row for row in saved.get(group, {}).get("checks", [])}
         for row in rows:
+            if group == "antivirus":
+                store.record_antivirus_paths(db, now, row.get("coverage", []))
             previous = before.get(row["id"], {})
             detection = group == "antivirus" and row["status"] == "fail"
             scope_changed = detection and paths != saved.get(group, {}).get("paths")

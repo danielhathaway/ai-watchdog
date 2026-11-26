@@ -211,6 +211,26 @@ class ConsoleIntegrationTests(unittest.TestCase):
             _, page, _ = request(console, "GET", f"/api/findings?status=unreviewed&before={ids[2]}")
             self.assertEqual([], page["events"])
 
+    def test_antivirus_history_supports_private_path_filter_and_pagination(self):
+        with running_console(self.database, workers=False) as console:
+            with store.connect(self.database) as db:
+                for at in range(27):
+                    store.record_antivirus_paths(db, at, [{"path": "/old scans", "duration_seconds": 1.75}])
+                    store.record_antivirus_paths(db, at, [{"path": "/other", "duration_seconds": None}])
+            endpoint = "/api/antivirus/history"
+            self.assertEqual(401, request(console, "GET", endpoint, authorized=False)[0])
+            self.assertEqual(400, request(console, "GET", endpoint + "?path=relative")[0])
+            self.assertEqual(400, request(console, "GET", endpoint + "?before=0")[0])
+            first = endpoint + "?path=%2Fold+scans"
+            code, history, _ = request(console, "GET", first)
+            self.assertEqual(200, code)
+            self.assertEqual(["/other", "/old scans"], history["paths"])
+            self.assertEqual(list(range(26, 1, -1)), [row["at"] for row in history["results"]])
+            self.assertEqual(1.75, history["results"][0]["duration_seconds"])
+            _, older, _ = request(console, "GET", first + f"&before={history['next_before']}")
+            self.assertEqual([1, 0], [row["at"] for row in older["results"]])
+            self.assertIsNone(older["next_before"])
+
     def test_scheduler_fires_overdue_check_after_reopening_the_database(self):
         with running_console(self.database, workers=False) as console:
             self.assertEqual(403, request(console, "PUT", "/api/schedule", body=b'{"interval_minutes":5}',

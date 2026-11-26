@@ -29,6 +29,11 @@ CREATE INDEX IF NOT EXISTS interface_spike_time ON interface_spikes(at);
 CREATE TABLE IF NOT EXISTS listener_inventory (
     at REAL PRIMARY KEY, listeners TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS antivirus_path_history (
+    id INTEGER PRIMARY KEY, at REAL NOT NULL, path TEXT NOT NULL, result TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS antivirus_history_time ON antivirus_path_history(at);
+CREATE INDEX IF NOT EXISTS antivirus_history_path ON antivirus_path_history(path, id);
 CREATE TABLE IF NOT EXISTS devices (
     identity TEXT PRIMARY KEY, mac TEXT, address TEXT NOT NULL, interface TEXT NOT NULL,
     first_seen REAL NOT NULL, last_seen REAL NOT NULL, observations INTEGER NOT NULL
@@ -94,7 +99,30 @@ def expire(db, now, days):
     db.execute("DELETE FROM traffic_attribution WHERE at < ?", (cutoff,))
     db.execute("DELETE FROM interface_spikes WHERE at < ?", (cutoff,))
     db.execute("DELETE FROM listener_inventory WHERE at < ?", (cutoff,))
+    db.execute("DELETE FROM antivirus_path_history WHERE at < ?", (cutoff,))
     db.execute("DELETE FROM devices WHERE last_seen < ?", (cutoff,))
+
+
+def record_antivirus_paths(db, at, coverage):
+    db.executemany("INSERT INTO antivirus_path_history(at,path,result) VALUES (?,?,?)",
+                   ((at, row["path"], json.dumps(row)) for row in coverage))
+
+
+def antivirus_history(db, path, before):
+    size = 25
+    rows = db.execute(
+        "SELECT id,at,result FROM antivirus_path_history "
+        "WHERE (? IS NULL OR path=?) AND (? IS NULL OR id<?) ORDER BY id DESC LIMIT ?",
+        (path, path, before, before, size + 1),
+    ).fetchall()
+    paths = [row[0] for row in db.execute(
+        "SELECT path FROM antivirus_path_history GROUP BY path ORDER BY max(id) DESC LIMIT 128"
+    )]
+    return {
+        "results": [{"id": row["id"], "at": row["at"], **json.loads(row["result"])} for row in rows[:size]],
+        "paths": paths,
+        "next_before": rows[size - 1]["id"] if len(rows) > size else None,
+    }
 
 
 def snapshot(db, now):

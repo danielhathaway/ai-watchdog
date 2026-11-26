@@ -102,13 +102,15 @@ class SystemChecksTests(unittest.TestCase):
             self.assertEqual("warn", checks.antivirus(["/found-text"])["status"])
 
     def test_antivirus_uses_one_scan_timeout_for_all_paths(self):
-        with patch.object(checks.time, "monotonic", side_effect=[0, 0, checks.ANTIVIRUS_TIMEOUT]), \
+        with patch.object(checks.time, "monotonic", side_effect=[0, 0, checks.ANTIVIRUS_TIMEOUT, checks.ANTIVIRUS_TIMEOUT]), \
              patch.object(checks.subprocess, "run", side_effect=subprocess.TimeoutExpired("clamscan", 900)) as scanner:
             report = checks.antivirus(["/first", "/remaining"])
         scanner.assert_called_once()
         self.assertEqual("warn", report["status"])
         self.assertEqual(["/first", "/remaining"], [row["path"] for row in report["coverage"]])
         self.assertIn("before this path was scanned", report["coverage"][1]["detail"])
+        self.assertEqual(checks.ANTIVIRUS_TIMEOUT, report["coverage"][0]["duration_seconds"])
+        self.assertIsNone(report["coverage"][1]["duration_seconds"])
 
     def test_manual_antivirus_scan_shares_the_worker_and_preserves_the_alert(self):
         config = self.directory / "config.json"

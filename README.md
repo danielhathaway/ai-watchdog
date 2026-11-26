@@ -151,7 +151,9 @@ Open **Sensors → Antivirus** for readiness, daily signature age, scan paths, a
 
 Use **Open findings** to review malware detections across the retained history. Filter by review status and use **Older** and **Newer** to page through results. **Acknowledge** records that you reviewed a finding. After a newer scan of the same configured paths finishes clean and scans at least one file, use **Resolve with clean scan** to link that result to the finding. The original alert remains in **Activity** under the usual retention policy, and the resolved findings filter shows the linked scan timestamp and summary. Older findings recorded before Watchdog saved the scan paths can be acknowledged.
 
-Scans run locally under the monitor account with a shared 15-minute limit. **Coverage by scan path** shows ClamAV's file counts, access errors, and file or archive limit hits for each configured path. A reported limit hit makes coverage incomplete. Counts for overlapping paths can include the same file twice. Directory scans skip symlinks and nested mounts. ClamAV uses official signatures, and Watchdog reports an incomplete scan if the signatures are missing or older than seven days. Watchdog reports findings and leaves the files in place. [ClamAV scanning documentation](https://docs.clamav.net/manual/Usage/Scanning.html)
+Scans run locally under the monitor account with a shared 15-minute limit. **Coverage by scan path** shows ClamAV's file counts, access errors, file or archive limit hits, and elapsed time for each attempted path. Elapsed time includes loading the scanner. A reported limit hit makes coverage incomplete. Counts for overlapping paths can include the same file twice. Directory scans skip symlinks and nested mounts. ClamAV uses official signatures, and Watchdog reports an incomplete scan if the signatures are missing or older than seven days. Watchdog reports findings and leaves the files in place. [ClamAV scanning documentation](https://docs.clamav.net/manual/Usage/Scanning.html)
+
+Open **Sensors → Antivirus coverage history** to see previous path results under the configured retention period. Filter by path or load older results. Retained results remain available after paths are removed from the configuration. History starts with scans run after this feature is installed.
 
 ### Optional Wi-Fi-only GNOME discovery
 
@@ -246,6 +248,23 @@ curl --fail --silent --show-error --retry 12 --retry-delay 1 --retry-connrefused
 
 Recovery restores matching links the supervisor recorded in this boot, removes its nftables table, and clears the isolation latch. After reboot or if a link or network manager has changed, restore connectivity through the host's usual network manager as needed. Verify any changed integrity files before authorizing a new baseline. If the original trigger remains, the supervisor can isolate the host again.
 
+### Roll back the Watchdog application
+
+Run the desktop command from the installed checkout as the monitor user. For the system installation, run from `/opt/ai-watchdog` with a trusted older checkout in a root-controlled directory.
+
+```sh
+# Desktop
+python3 -B -m watchdog rollback --desktop /path/to/trusted-older-checkout
+
+# System-wide
+cd /opt/ai-watchdog
+sudo python3 -B -m watchdog rollback /opt/trusted-older-checkout
+```
+
+The command stops the installed services, backs up the running application, configuration, SQLite database, dashboard token, and standard baseline files, then replaces the Python package and dashboard assets. It preserves the live configuration, database, service units, and installed dependencies. System-wide rollback checks for an isolation latch before making changes. Use a version compatible with the current configuration and database. Schedule a local maintenance window and stop any independent tools that write to the database before running the command.
+
+The backup path is printed before the change. Desktop backups are under `.watchdog/rollbacks` and system backups under `/var/lib/ai-watchdog-rollbacks`. Backups are private and contain the dashboard token. Keep them protected according to your local backup policy. After restarting the target, the command checks the authenticated dashboard and any previously running supervisor. If startup fails, it attempts to restore the original application and database and reports the backup path.
+
 ### Coverage limits
 
 This is a host-side detection and containment layer. It covers the host network namespace and the listed signals. Full-system hangs, a compromised kernel, and a sufficiently privileged attacker can defeat host-local enforcement. A separate switch, gateway, or management controller is required for containment when the host itself cannot execute. Payload inspection, malware scanning, and operating-system patch management are outside the implemented coverage.
@@ -286,7 +305,7 @@ bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img des
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img system-upgrade
 ```
 
-Each run creates a disposable disk overlay and verifies that FreshClam is enabled and downloads signatures. The Firefox test acknowledges an EICAR alert in **Open findings**, runs a clean scan after the sample is removed, and resolves the original finding with the linked result. The upgrade modes install the pre-review commit `ae1fe37`, upgrade, roll back to the previous binary against the same configuration and database, and reinstall the latest version to verify the review state survives. The system-wide mode also checks per-path coverage under home-directory restrictions, reports scan limits and unreadable files, and exercises stale signature recovery using the disposable guest clock.
+Each run creates a disposable disk overlay and verifies that FreshClam is enabled and downloads signatures. The Firefox test acknowledges an EICAR alert in **Open findings**, runs a clean scan after the sample is removed, checks retained coverage and timing for both results, and resolves the original finding. The upgrade modes install the pre-review commit `ae1fe37`, upgrade, use the operator rollback command and verify its state backup and dashboard health check, then reinstall the latest version to confirm the review and coverage history survived. The system-wide mode also checks per-path coverage under home-directory restrictions, reports scan limits and unreadable files, and exercises stale signature recovery using the disposable guest clock.
 
 The runner uses a loopback-only SSH tunnel for dashboard access and discards the guest and its test data afterward. A successful run prints `WATCHDOG_EICAR_VM_PASS`. The Firefox executable overrides above also apply to this test. Set `WATCHDOG_OVMF_CODE` and `WATCHDOG_OVMF_VARS` if OVMF is installed outside `/usr/share/OVMF`.
 

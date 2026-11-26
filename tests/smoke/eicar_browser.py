@@ -78,8 +78,14 @@ class EicarBrowser(BrowserSmoke):
         wait_for("""
             const coverage = document.querySelector('#antivirus-coverage');
             return coverage.open && coverage.innerText.includes(SCAN_SCOPE) &&
-                coverage.innerText.includes('Files counted by ClamAV: 1');
+                coverage.innerText.includes('Files counted by ClamAV: 1') && coverage.innerText.includes('Elapsed:');
         """.replace("SCAN_SCOPE", repr(self.scope)), "the coverage counts for the clean path")
+        call("POST", element("#antivirus-history summary") + "/click", {})
+        wait_for("""
+            const history = document.querySelector('#history-results');
+            return history.innerText.includes('Clean') && history.innerText.includes('Detection') &&
+                history.innerText.includes('Elapsed:');
+        """, "timing and retained coverage for both scan outcomes")
         call("POST", element("[data-page='findings']") + "/click", {})
         wait_for(f"return document.querySelector('{alert} button')?.textContent === 'Resolve with clean scan'",
                  "the clean scan resolution action")

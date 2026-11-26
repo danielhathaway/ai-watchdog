@@ -76,6 +76,9 @@ def main():
     baseline = actions.add_parser("baseline", help="Record a known-good integrity baseline")
     baseline.add_argument("--directory", type=Path, help="Record the Watchdog baseline for an observe-only installation")
     baseline.add_argument("--watchdog-only", action="store_true", help="Record only the Watchdog application baseline")
+    rollback = actions.add_parser("rollback", help="Back up Watchdog state and install a trusted older checkout")
+    rollback.add_argument("source", type=Path, help="Separate local checkout of the trusted rollback version")
+    rollback.add_argument("--desktop", action="store_true", help="Roll back the desktop user installation")
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -145,6 +148,17 @@ def main():
                 print(json.dumps(result, indent=2))
         except (OSError, KeyError, ValueError, TypeError, sqlite3.Error, subprocess.SubprocessError) as error:
             parser.exit(1, f"Vulnerability check failed: {error}\n")
+        return
+    if args.command == "rollback":
+        from .rollback import Deployment, RollbackError
+
+        if args.config != CONFIG:
+            parser.error("Rollback uses the installed Watchdog configuration")
+        try:
+            Deployment(args.desktop).rollback(args.source)
+        except (RollbackError, OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
+            parser.exit(1, f"Rollback failed: {error}\n")
+        print("Rollback completed. The dashboard health check passed.")
         return
     if args.command == "baseline" and args.directory is not None:
         from .system_checks import record_baseline

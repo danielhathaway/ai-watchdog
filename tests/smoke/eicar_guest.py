@@ -6,6 +6,8 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -146,15 +148,36 @@ class Guest:
             assert all(retained[key] == value for key, value in event.items() if key != "review"), retained
             return state
 
-        legacy = replace(LEGACY)
+        legacy_source = Path("/opt/watchdog-smoke-legacy")
+        legacy_source.mkdir(mode=0o755)
+        run("tar", "-xzf", LEGACY, "-C", str(legacy_source))
+        command = (*self.user, "/usr/bin/python3", "-B", "-m", "watchdog", "rollback", str(legacy_source))
+        if self.desktop:
+            command += ("--desktop",)
+        output = subprocess.check_output(command, cwd=REPO if self.desktop else "/opt/ai-watchdog", text=True)
+        assert "dashboard health check passed" in output, output
+        backup = Path(next(line.removeprefix("Rollback backup: ") for line in output.splitlines()
+                           if line.startswith("Rollback backup: ")))
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o700, backup
+        assert (backup / "state/config.json").read_bytes() == config
+        assert (backup / "state/token").read_bytes() == token
+        with sqlite3.connect(backup / "state/monitor.sqlite3") as database:
+            assert database.execute("SELECT detail FROM events WHERE id=?", (event["id"],)).fetchone() == (event["detail"],)
+            assert database.execute("SELECT count(*) FROM antivirus_path_history").fetchone()[0] > 0
+        legacy = self.wait(lambda status: status["ready"], "the rolled-back service")
+        assert self.config.read_bytes() == config and (self.state / "token").read_bytes() == token
+        latest = legacy["system_checks"]["antivirus"]
+        assert all(latest[key] == report[key] for key in ("at", "checks", "paths", "interval_minutes")), latest
+        retained, = [item for item in legacy["events"] if item["id"] == event["id"]]
+        assert all(retained[key] == value for key, value in event.items() if key != "review"), retained
         assert all("review" not in item for item in legacy["events"]), "The previous server was not running"
         with urlopen(self.origin, timeout=5) as response:
             assert b'id="findings"' not in response.read(), "The previous dashboard was not installed"
         current = replace(CURRENT)
         retained, = [item for item in current["events"] if item["id"] == older_event["id"]]
         assert retained["review"] == ack, retained
-        print(f"WATCHDOG_EICAR_ROLLBACK mode={self.mode} restarted previous version on the existing database "
-              "and retained review evidence after reinstall")
+        assert self.request("/api/antivirus/history")["results"], "Coverage history was lost during rollback"
+        print(f"WATCHDOG_EICAR_ROLLBACK mode={self.mode} backed up state, passed health checks and retained review history")
 
     def verify_coverage_recovery(self):
         hidden = Path("/home/ubuntu/watchdog-hidden")

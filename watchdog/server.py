@@ -181,6 +181,8 @@ class Handler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         if path == "/api/findings":
             self.get_findings(query)
+        elif path == "/api/antivirus/history":
+            self.get_antivirus_history(query)
         elif self.path in ASSETS:
             filename, mime = ASSETS[self.path]
             self.reply(200, (STATIC / filename).read_bytes(), mime)
@@ -227,6 +229,25 @@ class Handler(BaseHTTPRequestHandler):
             report = system_checks.read(db, monitor.settings).get("antivirus")
             result = reviews.list_findings(db, status, int(before) if before is not None else None, report)
         self.reply(200, result)
+
+    def get_antivirus_history(self, query):
+        try:
+            params = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+            if set(params) - {"path", "before"} or any(len(values) != 1 for values in params.values()):
+                raise ValueError
+            path = params.get("path", [None])[0]
+            before = params.get("before", [None])[0]
+            if path is not None and (not Path(path).is_absolute() or len(path) > 4096 or "\0" in path):
+                raise ValueError
+            if before is not None and not re.fullmatch(r"[1-9][0-9]{0,17}", before):
+                raise ValueError
+        except ValueError:
+            self.reply(400, {"error": "Invalid scan path or history cursor"})
+            return
+        with store.connect(self.server.monitor.database) as db:
+            db.execute("BEGIN")
+            history = store.antivirus_history(db, path, int(before) if before is not None else None)
+        self.reply(200, history)
 
     def do_POST(self):
         if not self.authorized(mutation=True):
