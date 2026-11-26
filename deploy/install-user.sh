@@ -11,6 +11,7 @@ case "$source_dir" in
         exit 1
         ;;
 esac
+sh "$source_dir/deploy/install-clamav.sh" "$@"
 umask 077
 state_dir="$source_dir/.watchdog"
 mkdir -p "$state_dir"

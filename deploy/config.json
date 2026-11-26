@@ -10,5 +10,7 @@
   "isolate_on_integrity": [],
   "ollama_model": "",
   "retention_days": 30,
-  "email_alerts": null
+  "email_alerts": null,
+  "antivirus_paths": [],
+  "antivirus_check_minutes": 1440
 }

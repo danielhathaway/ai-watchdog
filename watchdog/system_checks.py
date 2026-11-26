@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -17,11 +18,17 @@ from .sensors import IP, fingerprint
 
 APP = Path(__file__).resolve().parent
 SSHD = Path("/usr/sbin/sshd")
+CLAMSCAN = "/usr/bin/clamscan"
+ANTIVIRUS_TIMEOUT = 900
 UDP_INSTALL = Path("/opt/ai-watchdog-udp")
 MULTICAST_INSTALL = Path("/opt/ai-watchdog-multicast")
 WSDD_DPKG_HOOK = Path("/etc/dpkg/dpkg.cfg.d/90-ai-watchdog-wsdd")
 SYSTEM_UNITS = Path("/etc/systemd/system")
-GROUPS = {"health": ("health_check_minutes", 5), "hardening": ("hardening_check_minutes", 60)}
+GROUPS = {
+    "health": ("health_check_minutes", 5),
+    "hardening": ("hardening_check_minutes", 60),
+    "antivirus": ("antivirus_check_minutes", 1440),
+}
 PROBE_ERRORS = (OSError, ValueError, KeyError, TypeError, RecursionError, subprocess.SubprocessError)
 KERNEL_SETTINGS = {
     "kernel.randomize_va_space": 2,
@@ -386,13 +393,63 @@ def hardening(settings):
             *(kernel_check(key, minimum) for key, minimum in KERNEL_SETTINGS.items())]
 
 
+def antivirus(paths):
+    name = "ClamAV malware scan"
+    try:
+        with tempfile.TemporaryFile() as output:
+            scan = subprocess.run(
+                [CLAMSCAN, "--infected", "--recursive", "--cross-fs=no", "--follow-dir-symlinks=0",
+                 "--follow-file-symlinks=0", "--official-db-only=yes", "--fail-if-cvd-older-than=7", "--", *paths],
+                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, timeout=ANTIVIRUS_TIMEOUT,
+                env={**os.environ, "LC_ALL": "C"},
+            )
+            size = output.seek(0, os.SEEK_END)
+            output.seek(max(0, size - 4096))
+            summary = output.read().decode("utf-8", errors="replace").rpartition("----------- SCAN SUMMARY -----------")[2]
+            output.seek(0)
+            lines = output.read(8192).decode("utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return result("clamav", name, "warn", "ClamAV was not found at /usr/bin/clamscan.")
+    except subprocess.TimeoutExpired:
+        return result("clamav", name, "warn", f"The scan exceeded {ANTIVIRUS_TIMEOUT // 60} minutes.")
+    except OSError:
+        return result("clamav", name, "warn", "Watchdog could not run ClamAV or collect its report.")
+
+    if scan.returncode == 1:
+        findings = sorted({line[:512] for line in lines if line.endswith(" FOUND")})
+        count = re.search(r"^Infected files: (\d+)$", summary, re.MULTILINE)
+        errors = re.search(r"^Total errors: [1-9]\d*$", summary, re.MULTILINE)
+        detail = f"ClamAV reported {count[1]} infected files." if count else "ClamAV reported malware."
+        if findings:
+            detail += " " + " · ".join(findings[:5])
+        if errors:
+            detail += " Some files could not be scanned."
+        return result("clamav", name, "fail", detail)
+    if scan.returncode != 0:
+        diagnostic = next((line.strip()[:300] for line in lines if "ERROR:" in line or line.startswith("WARNING:")), "")
+        detail = f"ClamAV could not complete the scan (exit {scan.returncode})."
+        return result("clamav", name, "warn", (detail + " " + diagnostic).rstrip())
+    count = re.search(r"^Scanned files: (\d+)$", summary, re.MULTILINE)
+    if not count:
+        return result("clamav", name, "warn", "ClamAV did not provide a scan summary.")
+    if not int(count[1]):
+        return result("clamav", name, "skipped", "ClamAV did not scan any files in the configured paths.")
+    return result("clamav", name, "pass", f"No malware reported across {count[1]} scanned files.")
+
+
 def read(db, settings):
     saved = store.property_get(db, "system_checks", {})
-    return {group: {**saved.get(group, {}), "interval_minutes": settings.get(key, default)}
-            for group, (key, default) in GROUPS.items()}
+    reports = {group: {**saved.get(group, {}), "interval_minutes": settings.get(key, default)}
+               for group, (key, default) in GROUPS.items()}
+    paths = settings.get("antivirus_paths")
+    if not paths:
+        del reports["antivirus"]
+    elif reports["antivirus"].get("paths") != paths:
+        reports["antivirus"] = {"interval_minutes": reports["antivirus"]["interval_minutes"]}
+    return reports
 
 
-def save(database, group, now, rows):
+def save(database, group, now, rows, *, paths=None):
     with store.connect(database) as db:
         db.execute("BEGIN IMMEDIATE")
         saved = store.property_get(db, "system_checks", {})
@@ -407,25 +464,33 @@ def save(database, group, now, rows):
                 severity = "info"
             else:
                 continue
-            store.event(db, now, severity, "system-check", f'{row["name"]}: {row["status"]}',
-                        row["detail"], f'{group}/{row["id"]}')
+            title = ("ClamAV detected malware" if group == "antivirus" and row["status"] == "fail"
+                     else f'{row["name"]}: {row["status"]}')
+            store.event(db, now, severity, "system-check", title, row["detail"], f'{group}/{row["id"]}')
         if group == "hardening":
             for row in rows:
                 if row["id"] == "ports" and "listeners" in row:
                     db.execute("INSERT INTO listener_inventory(at, listeners) VALUES (?, ?)",
                                (now, json.dumps(row["listeners"])))
         saved[group] = {"at": now, "boot_id": BOOT_ID, "checks": rows}
+        if paths is not None:
+            saved[group]["paths"] = paths
         store.property_set(db, "system_checks", saved)
 
 
-def run(monitor):
+def run(monitor, *, antivirus_only=False):
+    paths = monitor.settings.get("antivirus_paths") if antivirus_only else None
+    collectors = (
+        (("antivirus", lambda: [antivirus(paths)]),) if antivirus_only else
+        (("health", lambda: health(monitor)), ("hardening", lambda: hardening(monitor.settings)))
+    )
     while not monitor.stop.wait(5):
         if not monitor.ready.is_set():
             continue
         try:
             with store.connect(monitor.database) as db:
                 saved = read(db, monitor.settings)
-            for group, collect in (("health", lambda: health(monitor)), ("hardening", lambda: hardening(monitor.settings))):
+            for group, collect in collectors:
                 previous = saved[group]
                 elapsed = time.time() - previous.get("at", 0)
                 outdated = group == "hardening" and any(
@@ -439,7 +504,7 @@ def run(monitor):
                 except Exception:
                     logging.exception("Scheduled %s checks failed", group)
                     continue
-                save(monitor.database, group, time.time(), rows)
+                save(monitor.database, group, time.time(), rows, paths=paths)
         except Exception:
             logging.exception("Scheduled system checks failed")
             monitor.stop.wait(55)

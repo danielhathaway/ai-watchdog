@@ -429,7 +429,9 @@ function render() {
 function renderSystemChecks() {
   const labels = {pass: "Passed", warn: "Review", fail: "Failed", unknown: "Unavailable", skipped: "Skipped"};
   const colors = {pass: "good-text", warn: "warning-text", fail: "bad-text"};
-  for (const group of ["health", "hardening"]) {
+  const antivirusEnabled = Boolean(snapshot.system_checks?.antivirus);
+  get("antivirus-panel").hidden = !antivirusEnabled;
+  for (const group of antivirusEnabled ? ["health", "hardening", "antivirus"] : ["health", "hardening"]) {
     const report = snapshot.system_checks?.[group];
     const target = get(`${group}-checks`);
     const listenersOpen = target.querySelector(".listener-inventory")?.open ?? false;

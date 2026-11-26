@@ -47,6 +47,9 @@ class Monitor:
         if not self.demo:
             threading.Thread(target=system_checks.run, args=(self,), name="scheduled-system-checks",
                              daemon=True).start()
+            if self.settings.get("antivirus_paths"):
+                threading.Thread(target=system_checks.run, args=(self,), kwargs={"antivirus_only": True},
+                                 name="scheduled-antivirus", daemon=True).start()
 
     def run(self):
         while not self.stop.is_set():

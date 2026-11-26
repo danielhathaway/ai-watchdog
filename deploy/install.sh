@@ -8,6 +8,7 @@ source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 for command in /usr/bin/python3 /usr/bin/journalctl /usr/bin/systemctl /usr/sbin/ip /usr/sbin/nft; do
     test -x "$command" || { echo "Missing $command" >&2; exit 1; }
 done
+sh "$source_dir/deploy/install-clamav.sh" "$@"
 getent group systemd-journal > /dev/null
 if ! getent group ai-watchdog > /dev/null; then
     groupadd --system ai-watchdog

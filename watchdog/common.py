@@ -28,6 +28,8 @@ DEFAULTS = {
     "email_alerts": None,
     "health_check_minutes": 5,
     "hardening_check_minutes": 60,
+    "antivirus_paths": [],
+    "antivirus_check_minutes": 1440,
     "allowed_listeners": [],
     "allowed_listener_rules": [],
 }
@@ -48,6 +50,7 @@ def configuration(path=CONFIG):
         ("port", 1024, 65535), ("interval", 5, 30), ("heartbeat_timeout", 30, 300),
         ("startup_grace", 10, 600), ("retention_days", 1, 365),
         ("health_check_minutes", 1, 10080), ("hardening_check_minutes", 1, 10080),
+        ("antivirus_check_minutes", 5, 10080),
     ):
         if type(settings[key]) is not int or not low <= settings[key] <= high:
             raise ValueError(f"Invalid {key}")
@@ -82,6 +85,14 @@ def configuration(path=CONFIG):
             raise ValueError(f"Invalid {key}")
     if any(not Path(path).is_absolute() for path in settings["integrity_paths"]):
         raise ValueError("Integrity paths must be absolute")
+    paths = settings["antivirus_paths"]
+    if not isinstance(paths, list) or len(paths) > 64 or any(
+        not isinstance(path, str) or not 0 < len(path) <= 4096 or not Path(path).is_absolute()
+        or "\x00" in path
+        for path in paths
+    ):
+        raise ValueError("antivirus_paths must be a list of absolute file or directory paths")
+    settings["antivirus_paths"] = sorted(set(paths))
     if set(settings["isolate_on_integrity"]) - set(settings["integrity_paths"]):
         raise ValueError("Isolation paths must be included in integrity_paths")
     settings["protected_networks"] = [

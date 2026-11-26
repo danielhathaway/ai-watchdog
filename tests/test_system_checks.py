@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,67 @@ class SystemChecksTests(unittest.TestCase):
         self.directory = Path(state.name)
         self.database = self.directory / "monitor.sqlite3"
         store.initialize(self.database)
+
+    def test_clamav_reports_detections_and_scan_errors_separately(self):
+        target = self.directory / "incoming files"
+
+        def scan_output(code, report):
+            def run(arguments, **options):
+                self.assertEqual(["--", str(target)], arguments[-2:])
+                self.assertIn("--follow-file-symlinks=0", arguments)
+                self.assertIn("--fail-if-cvd-older-than=7", arguments)
+                options["stdout"].write(report.encode())
+                return subprocess.CompletedProcess(arguments, code)
+            return run
+
+        for code, output, status, detail in (
+            (0, "Scanned files: 2\n", "pass", "2 scanned files"),
+            (0, "Scanned files: 0\n", "skipped", "did not scan any files"),
+            (1, "Infected files: 1\nTotal errors: 1\n", "fail", "test-signature FOUND"),
+            (2, "", "warn", "could not complete"),
+        ):
+            with self.subTest(code=code, status=status):
+                findings = f"{target}/sample: test-signature FOUND\n" if code == 1 else ""
+                report = findings + "----------- SCAN SUMMARY -----------\n" + output
+                with patch.object(checks.subprocess, "run", side_effect=scan_output(code, report)):
+                    row = checks.antivirus([str(target)])
+                self.assertEqual(status, row["status"])
+                self.assertIn(detail, row["detail"])
+
+        for failure, detail in ((FileNotFoundError(), "not found"), (subprocess.TimeoutExpired("clamscan", 900), "exceeded")):
+            with patch.object(checks.subprocess, "run", side_effect=failure):
+                row = checks.antivirus([str(target)])
+            self.assertEqual("warn", row["status"])
+            self.assertIn(detail, row["detail"])
+
+    def test_antivirus_results_use_the_configured_paths_and_existing_alerts(self):
+        config = self.directory / "config.json"
+        with store.connect(self.database) as db:
+            self.assertNotIn("antivirus", checks.read(db, configuration(config)))
+            store.property_set(db, "email_destination", {"minimum_severity": "high"})
+        paths = [str(self.directory / "incoming")]
+        write_json(config, {"antivirus_paths": paths})
+        settings = configuration(config)
+        row = checks.result("clamav", "ClamAV malware scan", "fail", "test-signature FOUND")
+        monitor = SimpleNamespace(database=self.database, settings=settings, stop=Mock(), ready=Mock())
+        monitor.stop.wait.side_effect = [False, False, False, True]
+        with patch.object(checks, "antivirus", return_value=row) as antivirus, \
+             patch.object(checks.time, "time", side_effect=[100, 100, 200, 86500, 86500]):
+            checks.run(monitor, antivirus_only=True)
+        self.assertEqual(2, antivirus.call_count)
+        antivirus.assert_called_with(paths)
+        with store.connect(self.database) as db:
+            report = checks.read(db, settings)["antivirus"]
+            self.assertEqual(1440, report["interval_minutes"])
+            self.assertEqual(86500, report["at"])
+            self.assertEqual([row], report["checks"])
+            self.assertEqual(("high", "ClamAV detected malware"),
+                             tuple(db.execute("SELECT severity, title FROM events").fetchone()))
+            self.assertEqual(1, db.execute("SELECT count(*) FROM email_outbox").fetchone()[0])
+            self.assertNotIn("at", checks.read(db, {**settings, "antivirus_paths": ["/other"]})["antivirus"])
+        write_json(config, {"antivirus_paths": ["relative/path"]})
+        with self.assertRaisesRegex(ValueError, "antivirus_paths"):
+            configuration(config)
 
     def test_listener_allowlist_ignores_both_loopbacks(self):
         output = """tcp LISTEN 0 128 127.0.0.1:8765 0.0.0.0:*

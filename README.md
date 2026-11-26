@@ -18,7 +18,7 @@ Open [127.0.0.1:8765](http://127.0.0.1:8765). The demo uses synthetic data in a 
 
 ## Install for your Linux user account
 
-Use this option for live observation without administrator access. It requires an active systemd user manager and uses sensors available to the logged-in account.
+Use this option for live observation under your own account. It requires an active systemd user manager and uses sensors available to the logged-in account. On APT-based hosts the installer may prompt for administrator access to set up ClamAV. Use `./deploy/install-user.sh --without-clamav` for an installation without administrator access.
 
 ```sh
 ./deploy/install-user.sh
@@ -131,6 +131,23 @@ python3 -m watchdog baseline --directory .watchdog
 ```
 
 The system installation records a root-owned Watchdog baseline with the existing `sudo python3 -B -m watchdog baseline` command. The baseline covers application code, dashboard assets, active configuration, service unit files and their local overrides, and installed UDP probe files when present. After an intentional update, review the files and use `sudo python3 -B -m watchdog baseline --watchdog-only` to refresh just the application baseline on system installations. The observe-only account owns its baseline, so a compromise of that account can affect what the checks report. Host-local checks also depend on the integrity of the running kernel.
+
+### Optional ClamAV antivirus
+
+On Ubuntu and Debian, both Watchdog installers install ClamAV and FreshClam when needed and start the signature updater for this boot and future boots. Rerunning an installer reuses the packages and any enabled FreshClam update timer. Use `--without-clamav` to skip package and updater setup. On systems without APT, install and update ClamAV using the distribution's package manager. [ClamAV package documentation](https://docs.clamav.net/manual/Installing/Packages.html)
+
+Add the following keys to `.watchdog/config.json` for the user installation or `/etc/ai-watchdog/config.json` for the system installation. Replace the example with files or directories readable by the monitor. The system unit hides home directories, so use the user installation for a Downloads folder.
+
+```json
+{
+  "antivirus_paths": ["/home/alex/Downloads"],
+  "antivirus_check_minutes": 1440
+}
+```
+
+Restart the monitor to apply the settings. The first scan runs shortly after the monitor is ready. Subsequent scans default to every 24 hours, with a configurable interval of 5 to 10,080 minutes. An empty path list disables scanning. After verifying the intentional configuration change, refresh the Watchdog file baseline as described above.
+
+Open **Sensors → Antivirus** for the latest result. Detections appear in **Activity** as high-severity events and use the existing email settings. Scans run locally under the monitor account and time out after 15 minutes. ClamAV uses official signatures, and Watchdog reports an incomplete scan if the signatures are missing or older than seven days. Directory scans skip symlinks and nested mounts and are subject to ClamAV's file and archive limits. Watchdog reports findings and leaves the files in place. [ClamAV scanning documentation](https://docs.clamav.net/manual/Usage/Scanning.html)
 
 ### Optional Wi-Fi-only GNOME discovery
 
@@ -256,6 +273,16 @@ bash tests/smoke/udp_vm.sh /path/to/vmlinuz-VERSION
 ```
 
 The runner builds an initramfs from local tools and boots a QEMU guest with no network adapter, disk, or host filesystem mount. The collector must reach readiness and publish the exact IPv4 and IPv6 UDP byte and datagram counts for the guest test process. Guest root loads the probes. The host runner uses no elevated privileges.
+
+Run the antivirus smoke test on an x86-64 Linux host with QEMU, OVMF, xorriso, OpenSSH, Python, Firefox, and GeckoDriver. Use the official Ubuntu 24.04 amd64 cloud image and allow the guest to reach the Ubuntu package mirrors and ClamAV signature servers. [Ubuntu cloud images](https://cloud-images.ubuntu.com/releases/noble/release/)
+
+```sh
+bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img
+```
+
+Each run creates a disposable disk overlay, runs the desktop user installer, and verifies that FreshClam is enabled and downloads signatures. The test then puts the standard EICAR file in a configured scan folder and checks that a scheduled scan produces a visible high-severity alert in **Activity** in headless Firefox. The runner uses a loopback-only SSH tunnel for dashboard access and discards the guest and its test data afterward. A successful run prints `WATCHDOG_EICAR_VM_PASS`. The Firefox executable overrides above also apply to this test. Set `WATCHDOG_OVMF_CODE` and `WATCHDOG_OVMF_VARS` if OVMF is installed outside `/usr/share/OVMF`.
+
+GitHub Actions runs the EICAR smoke test on pull requests and pushes to `main` that touch the installers, antivirus integration, or smoke test. The workflow also supports manual runs from the Actions tab.
 
 For additional source and deployment validation:
 
