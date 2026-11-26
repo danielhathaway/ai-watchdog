@@ -142,7 +142,9 @@ sudo ./deploy/install-wsdd-wifi.sh install wlp5s0
 
 The installer registers a local dpkg diversion so package updates install the vendor executable at `/usr/bin/wsdd.distrib`. It installs a launcher at `/usr/bin/wsdd` and adds one marked rule granting read access to that vendor file. The launcher binds discovery sockets to the Wi-Fi device and preserves the packaged behavior for other invocations. It refuses an unmanaged diversion or rule. Existing discovery processes pick up the launcher at their next start. Sign out and back in to restart the GNOME discovery session, then reopen **Network** in Files.
 
-After a `wsdd` or AppArmor update, run the check below. It verifies the diversion, launcher hash, vendor file, exact read rule, enforced profile, and packaged program startup. Watchdog also checks the installed files on its scheduled health cadence and reports any drift in **Sensors**. If an update replaced the profile and the original layout is still supported, rerun `install` with the same interface to restore the managed rule. Review any compatibility error before rerunning the installer.
+The installer registers a dpkg post-update hook. If dpkg installs a fresh copy of the packaged AppArmor profile, the hook restores the read rule and reloads the enforced profile before dpkg returns. The hook checks the package's conffile checksum and preserves the rest of the updated profile. Rerun `install` with the same interface to add the hook to an existing managed setup.
+
+After a `wsdd` or AppArmor update, run the check below. It verifies the hook, diversion, launcher hash, vendor file, exact read rule, enforced profile, and packaged program startup. Watchdog also checks the launcher and rule on its scheduled health cadence and reports drift in **Sensors**. If the hook warns that it could not restore the rule, review the profile and run the check before restarting discovery.
 
 ```sh
 sudo ./deploy/install-wsdd-wifi.sh check
@@ -153,6 +155,8 @@ To roll back, run the command below, then sign out and back in before reopening 
 ```sh
 sudo ./deploy/install-wsdd-wifi.sh rollback
 ```
+
+Rollback also removes the dpkg hook and its installed helper files.
 
 ### Email alerts
 

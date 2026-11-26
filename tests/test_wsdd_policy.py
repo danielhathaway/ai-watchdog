@@ -1,3 +1,4 @@
+import hashlib
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -19,6 +20,7 @@ class WsddPolicyTests(unittest.TestCase):
                 stack.enter_context(patch.object(policy, name, root / name_on_disk))
             policy.LAUNCHER.write_text("vendor-before-upgrade")
             policy.PROFILE.write_text(PACKAGE)
+            stack.enter_context(patch.object(manage, "HOOK", root / "dpkg-hook"))
             installed = False
 
             def diversion():
@@ -54,21 +56,41 @@ class WsddPolicyTests(unittest.TestCase):
 
             stack.enter_context(patch.object(Path, "lstat", lstat))
             manage.install("wlp5s0")
+            manage.check_hook()
             data = policy.manifest()
             policy.VENDOR.write_text("vendor-after-upgrade")
             self.assertEqual([], policy.check_files(data))
             self.assertIn(policy.BLOCK, policy.PROFILE.read_text())
             self.assertIn('WIFI = "wlp5s0"', policy.LAUNCHER.read_text())
 
+            # An installation from before the hook was added can be upgraded in place.
+            manage.HOOK.unlink()
+            for name in manage.HOOK_HELPERS:
+                (policy.STATE.parent / name).unlink()
+            with self.assertRaisesRegex(ValueError, "dpkg hook is missing"):
+                manage.check_hook()
+            manage.install("wlp5s0")
+            manage.check_hook()
+            self.assertEqual(data, policy.manifest())
+
             upgraded_profile = PACKAGE.replace("\n}", "\n  # Upstream addition\n}")
+            vendor_digest = hashlib.md5(upgraded_profile.encode(), usedforsecurity=False).hexdigest()
+            conffiles = f" {policy.PROFILE} {vendor_digest}\n"
+            stack.enter_context(patch.object(manage.subprocess, "check_output", return_value=conffiles))
+            policy.PROFILE.write_text(upgraded_profile + "# Local edit\n")
+            manage.repair_after_upgrade()
+            self.assertEqual(upgraded_profile + "# Local edit\n", policy.PROFILE.read_text())
+
             policy.PROFILE.write_text(upgraded_profile)
             self.assertIn("The managed AppArmor read rule is missing or changed", policy.check_files(data))
-            manage.install("wlp5s0")
+            manage.repair_after_upgrade()
             self.assertEqual([], policy.check_files(data))
             manage.rollback()
             self.assertEqual("vendor-after-upgrade", policy.LAUNCHER.read_text())
             self.assertEqual(upgraded_profile, policy.PROFILE.read_text())
             self.assertFalse(policy.STATE.exists())
+            self.assertFalse(manage.HOOK.exists())
+            self.assertFalse(any((policy.STATE.parent / name).exists() for name in manage.HOOK_HELPERS))
 
     def test_profile_refuses_unrecognized_or_unmanaged_rules(self):
         for old in (PACKAGE.replace("  /usr/bin/wsdd r,\n", ""), PACKAGE.replace(

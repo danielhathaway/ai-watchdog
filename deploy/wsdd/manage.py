@@ -11,12 +11,23 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from watchdog import wsdd_policy as policy
+HERE = Path(__file__).resolve().parent
+if HERE == Path("/var/lib/ai-watchdog-wsdd"):
+    sys.path.insert(0, str(HERE))
+    import wsdd_policy as policy
+else:
+    sys.path.insert(0, str(HERE.parents[1]))
+    from watchdog import wsdd_policy as policy
 
 PARSER = "/usr/sbin/apparmor_parser"
 PROFILE_LIST = Path("/sys/kernel/security/apparmor/profiles")
 LOCK = Path("/run/lock/ai-watchdog-wsdd.lock")
+HOOK = Path("/etc/dpkg/dpkg.cfg.d/90-ai-watchdog-wsdd")
+HOOK_HELPERS = ("manage.py", "wsdd_policy.py")
+HOOK_CONFIG = (
+    b"post-invoke /usr/bin/python3 -I -B /var/lib/ai-watchdog-wsdd/manage.py repair-after-upgrade "
+    b"|| echo 'Watchdog could not restore the wsdd policy; run install-wsdd-wifi.sh check.' >&2\n"
+)
 ANCHOR = re.compile(r"(?m)^[ \t]*/usr/bin/wsdd[ \t]+r,[ \t]*$")
 
 
@@ -59,6 +70,26 @@ def atomic(path, data, mode):
             temporary.unlink(missing_ok=True)
 
 
+def check_hook():
+    if not HOOK.exists() or not policy.trusted_file(HOOK) or HOOK.read_bytes() != HOOK_CONFIG:
+        raise ValueError("The managed dpkg hook is missing or changed")
+    for name in HOOK_HELPERS:
+        helper = policy.STATE.parent / name
+        if not helper.exists() or not policy.trusted_file(helper):
+            raise ValueError("The installed dpkg hook helper is missing or unsafe")
+
+
+def install_hook():
+    if (HOOK.exists() or HOOK.is_symlink()) and (
+        not policy.trusted_file(HOOK) or HOOK.read_bytes() != HOOK_CONFIG
+    ):
+        raise ValueError("An unmanaged dpkg hook already exists")
+    # Package transactions run as root, so the hook must use an installed copy.
+    for source in (Path(__file__), Path(policy.__file__)):
+        atomic(policy.STATE.parent / source.name, source.read_bytes(), 0o644)
+    atomic(HOOK, HOOK_CONFIG, 0o644)
+
+
 def load_profile(text):
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as staged:
         staged.write(text)
@@ -84,6 +115,37 @@ def check(data):
     print(f"Wi-Fi discovery policy for {data['interface']} passed its post-update checks.")
 
 
+def repair_after_upgrade():
+    if not policy.STATE.exists() or not policy.PROFILE.exists() or not policy.VENDOR.exists():
+        return
+    if not policy.trusted_file(policy.PROFILE):
+        raise ValueError("Unsafe packaged AppArmor profile")
+    original = policy.PROFILE.read_bytes()
+    old = original.decode()
+    if old.count(policy.BLOCK) == 1:
+        return
+    # Only patch a pristine wsdd package conffile. Leave other local edits for review.
+    conffiles = subprocess.check_output(
+        ["/usr/bin/dpkg-query", "-W", "-f=${Conffiles}", "wsdd"], text=True, timeout=5
+    )
+    digest = hashlib.md5(original, usedforsecurity=False).hexdigest()
+    if [str(policy.PROFILE), digest] not in [line.split() for line in conffiles.splitlines()]:
+        return
+    enforce()
+    data = policy.manifest()
+    if (policy.diversion() != ("LOCAL", str(policy.VENDOR))
+            or not policy.launcher_matches(data) or not policy.trusted_file(policy.VENDOR, executable=True)):
+        raise ValueError("Existing wsdd launcher or diversion changed")
+    new = profile_content(old, True)
+    try:
+        load_profile(new)
+        check(data)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        load_profile(old)
+        raise
+    print("Restored the managed wsdd AppArmor rule after the dpkg update.")
+
+
 def install(interface):
     if not policy.INTERFACE.fullmatch(interface):
         raise ValueError("Use an exact Wi-Fi interface name, such as wlp5s0")
@@ -95,6 +157,10 @@ def install(interface):
         raise ValueError("Unsafe packaged AppArmor profile")
     old = policy.PROFILE.read_text()
     new = profile_content(old, True)
+    policy.STATE.parent.mkdir(mode=0o755, exist_ok=True)
+    info = policy.STATE.parent.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError("Unsafe wsdd policy state directory")
     if policy.STATE.exists():
         data = policy.manifest()
         if data["interface"] != interface or policy.diversion() != ("LOCAL", str(policy.VENDOR)) or (
@@ -104,6 +170,7 @@ def install(interface):
         try:
             load_profile(new)
             check(data)
+            install_hook()
         except (OSError, ValueError, subprocess.SubprocessError):
             load_profile(old)
             raise
@@ -114,17 +181,15 @@ def install(interface):
     code = Path(__file__).with_name("wsdd").read_bytes().replace(b"__WIFI_INTERFACE__", interface.encode())
     compile(code, str(policy.LAUNCHER), "exec")
     data = {"interface": interface, "launcher_sha256": hashlib.sha256(code).hexdigest()}
-    policy.STATE.parent.mkdir(mode=0o755, exist_ok=True)
-    info = policy.STATE.parent.lstat()
-    if not policy.STATE.parent.is_dir() or policy.STATE.parent.is_symlink() or info.st_uid != 0 or info.st_mode & 0o022:
-        raise ValueError("Unsafe wsdd policy state directory")
     divert("--add")
     try:
         atomic(policy.LAUNCHER, code, 0o755)
         load_profile(new)
         check(data)
         atomic(policy.STATE, json.dumps(data).encode(), 0o644)
+        install_hook()
     except (OSError, ValueError, subprocess.SubprocessError):
+        policy.STATE.unlink(missing_ok=True)
         policy.LAUNCHER.unlink(missing_ok=True)
         divert("--remove")
         load_profile(old)
@@ -143,6 +208,10 @@ def rollback():
     code = policy.LAUNCHER.read_bytes()
     old = policy.PROFILE.read_text()
     new = profile_content(old, False)
+    if (HOOK.exists() or HOOK.is_symlink()) and (
+        not policy.trusted_file(HOOK) or HOOK.read_bytes() != HOOK_CONFIG
+    ):
+        raise ValueError("An unmanaged dpkg hook already exists")
     try:
         load_profile(new)
         policy.LAUNCHER.unlink()
@@ -155,6 +224,9 @@ def rollback():
         load_profile(old)
         raise
     policy.STATE.unlink()
+    HOOK.unlink(missing_ok=True)
+    for name in HOOK_HELPERS:
+        (policy.STATE.parent / name).unlink(missing_ok=True)
     print("Restored the packaged wsdd executable and removed the managed AppArmor rule.")
 
 
@@ -164,9 +236,15 @@ def main():
     actions.add_parser("install").add_argument("interface")
     actions.add_parser("check")
     actions.add_parser("rollback")
+    actions.add_parser("repair-after-upgrade")
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("Run this command as root to manage or check the enforced AppArmor profile")
+    if args.action == "repair-after-upgrade" and (
+        os.environ.get("DPKG_ROOT") not in {None, "", "/"}
+        or os.environ.get("DPKG_ADMINDIR") not in {None, "/var/lib/dpkg"}
+    ):
+        return
     try:
         fd = os.open(LOCK, os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_RDWR, 0o600)
         with os.fdopen(fd, "rb+") as lock:
@@ -174,7 +252,10 @@ def main():
             if args.action == "install":
                 install(args.interface)
             elif args.action == "check":
+                check_hook()
                 check(policy.manifest())
+            elif args.action == "repair-after-upgrade":
+                repair_after_upgrade()
             else:
                 rollback()
     except (OSError, ValueError, subprocess.SubprocessError) as error:
