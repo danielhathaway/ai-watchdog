@@ -175,6 +175,42 @@ class ConsoleIntegrationTests(unittest.TestCase):
             store.expire(db, now + 86401, 1)
             self.assertEqual(0, db.execute("SELECT count(*) FROM finding_reviews").fetchone()[0])
 
+    def test_findings_pagination_and_filters_reach_events_beyond_activity(self):
+        with running_console(self.database, workers=False) as console:
+            now = time.time()
+            with store.connect(self.database) as db:
+                ids = [
+                    store.event(db, now, "high", "system-check", "ClamAV detected malware", str(index), "antivirus/clamav")
+                    for index in range(53)
+                ]
+                db.execute("INSERT INTO finding_reviews(event_id, acknowledged_at, resolved_at) VALUES (?, ?, ?)",
+                           (ids[0], now, now))
+                db.execute("INSERT INTO finding_reviews(event_id, acknowledged_at) VALUES (?, ?)", (ids[1], now))
+                for _ in range(101):
+                    store.event(db, now, "info", "test", "Other event")
+            status, activity, _ = request(console, "GET", "/api/status")
+            self.assertEqual(200, status)
+            self.assertTrue(all(event["kind"] == "test" for event in activity["events"]))
+            self.assertEqual(401, request(console, "GET", "/api/findings", authorized=False)[0])
+            for query in ("?status=bad", "?before=0", "?status=open&status=all", "?unknown=1"):
+                self.assertEqual(400, request(console, "GET", "/api/findings" + query)[0])
+
+            found = []
+            path = "/api/findings"
+            for count in (25, 25, 2):
+                status, page, _ = request(console, "GET", path)
+                self.assertEqual(200, status)
+                self.assertEqual(count, len(page["events"]))
+                found.extend(item["id"] for item in page["events"])
+                path = f"/api/findings?before={page['next_before']}"
+            self.assertIsNone(page["next_before"])
+            self.assertEqual(list(reversed(ids[1:])), found)
+            for status, expected in (("acknowledged", [ids[1]]), ("resolved", [ids[0]])):
+                _, page, _ = request(console, "GET", f"/api/findings?status={status}")
+                self.assertEqual(expected, [item["id"] for item in page["events"]])
+            _, page, _ = request(console, "GET", f"/api/findings?status=unreviewed&before={ids[2]}")
+            self.assertEqual([], page["events"])
+
     def test_scheduler_fires_overdue_check_after_reopening_the_database(self):
         with running_console(self.database, workers=False) as console:
             self.assertEqual(403, request(console, "PUT", "/api/schedule", body=b'{"interval_minutes":5}',

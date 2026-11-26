@@ -3,15 +3,36 @@ import json
 
 from . import store
 
+MALWARE_EVENT = ("system-check", "antivirus/clamav", "high", "ClamAV detected malware")
+FINDINGS_PAGE_SIZE = 25
+FINDING_FILTERS = {
+    "open": "finding_reviews.resolved_at IS NULL",
+    "unreviewed": "finding_reviews.acknowledged_at IS NULL",
+    "acknowledged": "finding_reviews.acknowledged_at IS NOT NULL AND finding_reviews.resolved_at IS NULL",
+    "resolved": "finding_reviews.resolved_at IS NOT NULL",
+    "all": "1",
+}
 
 class ReviewConflict(Exception):
     pass
 
 
 def is_malware(event):
-    return (event["kind"], event["subject"], event["severity"], event["title"]) == (
-        "system-check", "antivirus/clamav", "high", "ClamAV detected malware",
-    )
+    return (event["kind"], event["subject"], event["severity"], event["title"]) == MALWARE_EVENT
+
+
+def list_findings(db, status, before, report):
+    conditions = FINDING_FILTERS[status]
+    events = [dict(row) for row in db.execute(
+        "SELECT events.* FROM events LEFT JOIN finding_reviews ON finding_reviews.event_id=events.id "
+        "WHERE events.kind=? AND events.subject=? AND events.severity=? AND events.title=? "
+        f"AND ({conditions}) AND (? IS NULL OR events.id < ?) ORDER BY events.id DESC LIMIT ?",
+        (*MALWARE_EVENT, before, before, FINDINGS_PAGE_SIZE + 1),
+    )]
+    has_more = len(events) > FINDINGS_PAGE_SIZE
+    events = events[:FINDINGS_PAGE_SIZE]
+    annotate(db, events, report)
+    return {"events": events, "next_before": events[-1]["id"] if has_more else None}
 
 
 def record_scope(db, event_id, paths):

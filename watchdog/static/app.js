@@ -8,7 +8,7 @@ const date = (stamp) => new Date(stamp * 1000);
 const time = (stamp) => date(stamp).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
 const fullDate = (stamp) => date(stamp).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
 const number = new Intl.NumberFormat();
-const pages = {overview: "Overview", activity: "Activity", devices: "Devices", sensors: "Sensors", settings: "Settings"};
+const pages = {overview: "Overview", activity: "Activity", findings: "Open findings", devices: "Devices", sensors: "Sensors", settings: "Settings"};
 let token = sessionStorage.getItem("watchdog-token") || "";
 let snapshot = null;
 let pending = false;
@@ -16,6 +16,9 @@ let antivirusPending = false;
 let generation = 0;
 let accessFailed = false;
 let scheduleEdited = false;
+let findingCursors = [null];
+let nextFindingCursor = null;
+let findingRequest = 0;
 
 function announce(message) {
   get("error").hidden = !message;
@@ -49,6 +52,7 @@ function route() {
     else link.removeAttribute("aria-current");
   }
   text("page-name", pages[id]);
+  if (id === "findings" && snapshot) loadFindings();
   drawTraffic();
 }
 
@@ -336,7 +340,7 @@ function eventList(id, records) {
     description.append(element("strong", record.title));
     const details = [record.subject, record.detail].filter(Boolean).join(" · ");
     if (details) description.append(element("small", details));
-    if (id === "all-events" && record.review) description.append(findingReview(record));
+    if (id !== "recent-events" && record.review) description.append(findingReview(record));
     if (record.kind === "anomaly" && ["rx", "tx"].includes(record.subject)) {
       description.append(spikeAttribution(record, openItems.has(String(record.id))));
     }
@@ -345,7 +349,39 @@ function eventList(id, records) {
     item.append(status, description, when);
     return item;
   });
-  container.replaceChildren(...(items.length ? items : [element("li", "No matching events.", "empty")]));
+  const empty = id === "finding-events" ? "No matching findings." : "No matching events.";
+  container.replaceChildren(...(items.length ? items : [element("li", empty, "empty")]));
+}
+
+async function loadFindings() {
+  const current = ++findingRequest;
+  const before = generation;
+  const query = new URLSearchParams({status: get("finding-status").value});
+  const cursor = findingCursors.at(-1);
+  if (cursor != null) query.set("before", cursor);
+  try {
+    const page = await api("/api/findings?" + query);
+    if (before !== generation || current !== findingRequest) return;
+    if (!page.events.length && findingCursors.length > 1) {
+      findingCursors.pop();
+      await loadFindings();
+      return;
+    }
+    nextFindingCursor = page.next_before;
+    eventList("finding-events", page.events);
+    text("finding-page", `Page ${findingCursors.length}`);
+    get("finding-newer").disabled = findingCursors.length === 1;
+    get("finding-older").disabled = nextFindingCursor == null;
+  } catch (error) {
+    if (before === generation && current === findingRequest && location.hash === "#findings") announce(error.message);
+  }
+}
+
+function changeFindingsPage() {
+  nextFindingCursor = null;
+  get("finding-newer").disabled = true;
+  get("finding-older").disabled = true;
+  loadFindings();
 }
 
 function findingReview({id, review}) {
@@ -559,6 +595,21 @@ function renderAntivirus(report) {
   }
   result.append(element("dt", "Last result"), detail);
   get("antivirus-checks").replaceChildren(result);
+  const coverage = scan?.coverage ?? [];
+  get("antivirus-coverage").hidden = !coverage.length;
+  get("antivirus-path-results").replaceChildren(...coverage.map((path) => {
+    const row = element("div");
+    const detail = element("dd");
+    const counts = [];
+    if (path.files_scanned != null) counts.push(`Files counted by ClamAV: ${number.format(path.files_scanned)}`);
+    if (path.access_errors) counts.push(`Access errors: ${number.format(path.access_errors)}`);
+    if (path.scan_errors) counts.push(`Scan errors: ${number.format(path.scan_errors)}`);
+    if (path.limit_hits) counts.push(`File or archive limit hits: ${number.format(path.limit_hits)}`);
+    detail.append(element("strong", outcomes[path.status], style[path.status]), element("span", path.detail));
+    if (counts.length) detail.append(element("span", counts.join(" · ")));
+    row.append(element("dt", path.path), detail);
+    return row;
+  }));
 }
 
 function renderSettings() {
@@ -594,6 +645,14 @@ function lock(showError = false) {
   feedback("");
   token = "";
   snapshot = null;
+  findingCursors = [null];
+  nextFindingCursor = null;
+  get("finding-status").value = "open";
+  get("finding-events").replaceChildren();
+  delete get("finding-events").dataset.eventKey;
+  text("finding-page", "");
+  get("finding-newer").disabled = true;
+  get("finding-older").disabled = true;
   sessionStorage.removeItem("watchdog-token");
   get("dashboard").hidden = true;
   get("unlock").hidden = false;
@@ -616,6 +675,7 @@ async function refresh() {
     if (accessFailed || initial) announce("");
     accessFailed = false;
     render();
+    if (location.hash === "#findings") loadFindings();
   } catch (error) {
     if (generation !== before) return;
     if (error.unauthorized) lock(Boolean(token));
@@ -695,6 +755,19 @@ get("schedule-form").addEventListener("submit", async (event) => {
   }
 });
 get("severity").addEventListener("change", filterEvents);
+get("finding-status").addEventListener("change", () => {
+  findingCursors = [null];
+  changeFindingsPage();
+});
+get("finding-newer").addEventListener("click", () => {
+  findingCursors.pop();
+  changeFindingsPage();
+});
+get("finding-older").addEventListener("click", () => {
+  if (nextFindingCursor == null) return;
+  findingCursors.push(nextFindingCursor);
+  changeFindingsPage();
+});
 window.addEventListener("hashchange", route);
 window.addEventListener("resize", drawTraffic);
 route();

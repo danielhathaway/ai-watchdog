@@ -420,52 +420,102 @@ def antivirus_readiness(now):
     return {"state": state, "engine": engine, "signatures_at": published, "signature_version": build}
 
 
-def antivirus(paths):
-    name = "ClamAV malware scan"
+def antivirus_path(path, timeout):
+    report = {"path": path, "status": "warn", "files_scanned": None, "scan_errors": 0,
+              "access_errors": 0, "limit_hits": 0, "detections": 0}
+    if timeout <= 0:
+        return {**report, "detail": "Scan time limit reached before this path was scanned."}
     try:
         with tempfile.TemporaryFile() as output:
             scan = subprocess.run(
-                [CLAMSCAN, "--infected", "--recursive", "--cross-fs=no", "--follow-dir-symlinks=0",
-                 "--follow-file-symlinks=0", "--official-db-only=yes",
-                 f"--fail-if-cvd-older-than={ANTIVIRUS_SIGNATURE_MAX_DAYS}", "--", *paths],
-                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, timeout=ANTIVIRUS_TIMEOUT,
+                [CLAMSCAN, "--suppress-ok-results", "--recursive", "--cross-fs=no", "--follow-dir-symlinks=0",
+                 "--follow-file-symlinks=0", "--official-db-only=yes", "--alert-exceeds-max=yes",
+                 f"--fail-if-cvd-older-than={ANTIVIRUS_SIGNATURE_MAX_DAYS}", "--", path],
+                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, timeout=timeout,
                 env={**os.environ, "LC_ALL": "C"},
             )
             size = output.seek(0, os.SEEK_END)
             output.seek(max(0, size - 4096))
             summary = output.read().decode("utf-8", errors="replace").rpartition("----------- SCAN SUMMARY -----------")[2]
             output.seek(0)
-            lines = output.read(8192).decode("utf-8", errors="replace").splitlines()
+            findings = []
+            detection_lines = 0
+            diagnostic = ""
+            for raw in output:
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if line.endswith(" FOUND"):
+                    signature = line.rpartition(": ")[2]
+                    if signature.startswith(("Heuristics.Limits.Exceeded.", "Heuristics.Limits.Exceeded FOUND")):
+                        report["limit_hits"] += 1
+                    else:
+                        detection_lines += 1
+                        if len(findings) < 5:
+                            findings.append(line[:512])
+                elif line.endswith(("Access denied", "Permission denied", "Can't open directory.")):
+                    report["access_errors"] += 1
+                    if not diagnostic:
+                        diagnostic = line[:300]
+                elif not diagnostic and ("ERROR:" in line or line.startswith("WARNING:")):
+                    diagnostic = line[:300]
     except FileNotFoundError:
-        return result("clamav", name, "warn", "ClamAV was not found at /usr/bin/clamscan.")
+        return {**report, "detail": "ClamAV was not found at /usr/bin/clamscan."}
     except subprocess.TimeoutExpired:
-        return result("clamav", name, "warn", f"The scan exceeded {ANTIVIRUS_TIMEOUT // 60} minutes.")
+        return {**report, "detail": f"The scan exceeded {ANTIVIRUS_TIMEOUT // 60} minutes."}
     except OSError:
-        return result("clamav", name, "warn", "Watchdog could not run ClamAV or collect its report.")
+        return {**report, "detail": "Watchdog could not run ClamAV or collect its report."}
 
     fields = dict(re.findall(r"^(Scanned files|Infected files|Total errors): (\d+)$", summary, re.MULTILINE))
     scanned = int(fields["Scanned files"]) if "Scanned files" in fields else None
     errors = int(fields.get("Total errors", 0))
-    coverage = {"files_scanned": scanned, "scan_errors": errors}
-    if scan.returncode == 1:
-        findings = sorted({line[:512] for line in lines if line.endswith(" FOUND")})
-        count = fields.get("Infected files")
-        detail = f"ClamAV reported {count} infected files." if count else "ClamAV reported malware."
+    limits = report["limit_hits"]
+    reported = int(fields.get("Infected files", 0))
+    # ClamAV versions differ in whether limit alerts count as infected files or scan errors.
+    detections = 0
+    if reported or scan.returncode == 1:
+        detections = max(min(detection_lines, reported or 1), reported - limits,
+                         int(scan.returncode == 1 and not limits))
+    report.update(files_scanned=scanned, scan_errors=errors, detections=detections)
+    if detections:
+        detail = f"ClamAV reported {detections} infected files."
         if findings:
-            detail += " " + " · ".join(findings[:5])
-        if errors:
-            detail += " Some files could not be scanned."
-        return {**result("clamav", name, "fail", detail), **coverage}
-    if scan.returncode != 0 or errors:
-        diagnostic = next((line.strip()[:300] for line in lines if "ERROR:" in line or line.startswith("WARNING:")), "")
+            detail += " " + " · ".join(findings)
+        return {**report, "status": "fail", "detail": detail}
+    if limits:
+        detail = f"ClamAV reported {limits} file or archive limit hits."
+        return {**report, "detail": detail}
+    if scan.returncode != 0 or errors or report["access_errors"]:
         detail = f"ClamAV could not complete the scan (exit {scan.returncode})."
-        return {**result("clamav", name, "warn", (detail + " " + diagnostic).rstrip()), **coverage}
+        return {**report, "detail": (detail + " " + diagnostic).rstrip()}
     if scanned is None:
-        return result("clamav", name, "warn", "ClamAV did not provide a scan summary.")
+        return {**report, "detail": "ClamAV did not provide a scan summary."}
     if not scanned:
-        return {**result("clamav", name, "skipped", "ClamAV did not scan any files in the configured paths."), **coverage}
-    detail = f"No malware reported across {scanned} scanned files."
-    return {**result("clamav", name, "pass", detail), **coverage}
+        return {**report, "status": "skipped", "detail": "ClamAV did not scan any files in this path."}
+    return {**report, "status": "pass", "detail": f"No malware reported across {scanned} scanned files."}
+
+
+def antivirus(paths):
+    deadline = time.monotonic() + ANTIVIRUS_TIMEOUT
+    coverage = [antivirus_path(path, deadline - time.monotonic()) for path in paths]
+    detections = [row for row in coverage if row["status"] == "fail"]
+    incomplete = [row for row in coverage if row["status"] == "warn"]
+    scanned = [row["files_scanned"] for row in coverage if row["files_scanned"] is not None]
+    totals = {key: sum(row[key] for row in coverage) for key in ("scan_errors", "limit_hits", "access_errors")}
+    if detections:
+        status = "fail"
+        detail = " · ".join(row["detail"] for row in detections[:5])
+        if incomplete or any(totals.values()):
+            detail += " Some files could not be scanned."
+    elif incomplete:
+        status = "warn"
+        detail = incomplete[0]["detail"] if len(coverage) == 1 else f"ClamAV could not complete {len(incomplete)} scan paths."
+    elif sum(scanned):
+        status = "pass"
+        detail = f"No malware reported across {sum(scanned)} scanned files."
+    else:
+        status = "skipped"
+        detail = "ClamAV did not scan any files in the configured paths."
+    return {**result("clamav", "ClamAV malware scan", status, detail), **totals,
+            "files_scanned": sum(scanned) if scanned else None, "coverage": coverage}
 
 
 def read(db, settings):
@@ -517,7 +567,8 @@ def antivirus_next_at(report, now):
     if report.get("boot_id") != BOOT_ID or not 0 < at <= now:
         return now
     interval = report["interval_minutes"] * 60
-    if any(row["status"] == "warn" or row.get("scan_errors") for row in report["checks"]):
+    if any(row["status"] == "warn" or row.get("scan_errors") or row.get("limit_hits") or
+           any(path["status"] == "warn" for path in row.get("coverage", [])) for row in report["checks"]):
         interval = min(interval, ANTIVIRUS_RETRY_SECONDS)
     return at + interval
 

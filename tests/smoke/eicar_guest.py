@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -123,6 +124,38 @@ class Guest:
         assert retained["review"]["acknowledged_at"] is None, retained
         print(f"WATCHDOG_EICAR_UPGRADE mode={self.mode} preserved configuration, scan history and event {event['id']}")
 
+    def verify_rollback(self, report, event, older_event):
+        ack = self.request(f"/api/alerts/{older_event['id']}/acknowledge", "POST")
+        config = self.config.read_bytes()
+        token = (self.state / "token").read_bytes()
+
+        def replace(archive):
+            run(*self.control, "stop", self.service)
+            # Replace application files while retaining the live configuration and database.
+            shutil.rmtree(REPO / "watchdog")
+            if not self.desktop:
+                shutil.rmtree("/opt/ai-watchdog/watchdog")
+            self.install(archive)
+            self.restart()
+            assert self.config.read_bytes() == config, "Rollback or reinstall replaced the configuration"
+            assert (self.state / "token").read_bytes() == token, "Rollback or reinstall replaced the token"
+            state = self.wait(lambda status: status["ready"], "the restarted service")
+            latest = state["system_checks"]["antivirus"]
+            assert all(latest[key] == report[key] for key in ("at", "checks", "paths", "interval_minutes")), latest
+            retained, = [item for item in state["events"] if item["id"] == event["id"]]
+            assert all(retained[key] == value for key, value in event.items() if key != "review"), retained
+            return state
+
+        legacy = replace(LEGACY)
+        assert all("review" not in item for item in legacy["events"]), "The previous server was not running"
+        with urlopen(self.origin, timeout=5) as response:
+            assert b'id="findings"' not in response.read(), "The previous dashboard was not installed"
+        current = replace(CURRENT)
+        retained, = [item for item in current["events"] if item["id"] == older_event["id"]]
+        assert retained["review"] == ack, retained
+        print(f"WATCHDOG_EICAR_ROLLBACK mode={self.mode} restarted previous version on the existing database "
+              "and retained review evidence after reinstall")
+
     def verify_coverage_recovery(self):
         hidden = Path("/home/ubuntu/watchdog-hidden")
         hidden.mkdir()
@@ -132,6 +165,8 @@ class Guest:
         blocked = self.wait_scan(started, "warn", readiness="ready")["system_checks"]["antivirus"]
         assert blocked["checks"][0]["files_scanned"] == 1, blocked
         assert blocked["next_at"] - blocked["at"] == 300, blocked
+        coverage = {row["path"]: row["status"] for row in blocked["checks"][0]["coverage"]}
+        assert coverage == {str(self.scope): "pass", str(hidden): "warn"}, blocked
         started = time.time()
         self.configure([self.scope])
         self.wait_scan(started, "pass", readiness="ready")
@@ -141,17 +176,22 @@ class Guest:
         restricted.mkdir()
         (restricted / "readable-after-repair.txt").write_text("Temporary permission recovery fixture.\n")
         restricted.chmod(0o700)
+        oversized = self.scope / "oversized.bin"
+        with oversized.open("wb") as output:
+            output.truncate(128 * 1024 * 1024)
         try:
             incomplete = self.scan("warn", readiness="ready")["system_checks"]["antivirus"]
-            assert incomplete["checks"][0]["scan_errors"] > 0, incomplete
+            path, = incomplete["checks"][0]["coverage"]
+            assert path["path"] == str(self.scope) and path["access_errors"] > 0 and path["limit_hits"] == 1, path
             assert incomplete["next_at"] - incomplete["at"] == 300, incomplete
         finally:
             restricted.chmod(0o755)
+            oversized.unlink()
         clean = self.scan("pass", readiness="ready")["system_checks"]["antivirus"]
         assert clean["checks"][0]["files_scanned"] == 2, clean
         (restricted / "readable-after-repair.txt").unlink()
         restricted.rmdir()
-        print("WATCHDOG_EICAR_RECOVERY unreadable directory recovered after permissions were repaired")
+        print("WATCHDOG_EICAR_RECOVERY reported path access errors and a file limit, then scanned both readable files")
 
     def verify_stale_recovery(self):
         # Advance only the disposable guest clock so ClamAV sees its real signed database as stale.
@@ -187,6 +227,7 @@ class Guest:
             self.configure([self.scope])
             report, event = self.detection(self.wait_scan(started, "fail"), sample)
             if self.mode != "desktop":
+                older_event = event
                 self.verify_upgrade(report, event)
         finally:
             sample.unlink()
@@ -199,8 +240,9 @@ class Guest:
             sample = self.scope / "eicar.com.txt"
             sample.write_bytes(EICAR)
             try:
-                _, event = self.detection(self.scan("fail", readiness="ready"), sample)
+                report, event = self.detection(self.scan("fail", readiness="ready"), sample)
                 assert event["review"]["scope_recorded"], event
+                self.verify_rollback(report, event, older_event)
             finally:
                 sample.unlink()
         print(f"WATCHDOG_EICAR_ACTIVITY event={event['id']} severity={event['severity']} detail={event['detail']}")

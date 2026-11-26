@@ -8,6 +8,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from . import analysis, notifications, reviews, schedule, store, system_checks, vulnerabilities
 
@@ -177,7 +178,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.authorized():
             return
-        if self.path in ASSETS:
+        path, _, query = self.path.partition("?")
+        if path == "/api/findings":
+            self.get_findings(query)
+        elif self.path in ASSETS:
             filename, mime = ASSETS[self.path]
             self.reply(200, (STATIC / filename).read_bytes(), mime)
         elif self.path == "/health":
@@ -204,6 +208,25 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, data)
         else:
             self.reply(404, {"error": "Not found"})
+
+    def get_findings(self, query):
+        try:
+            params = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+            if set(params) - {"status", "before"} or any(len(values) != 1 for values in params.values()):
+                raise ValueError
+            status = params.get("status", ["open"])[0]
+            before = params.get("before", [None])[0]
+            if status not in reviews.FINDING_FILTERS or (before is not None and not re.fullmatch(r"[1-9][0-9]{0,17}", before)):
+                raise ValueError
+        except ValueError:
+            self.reply(400, {"error": "Invalid findings filter or page cursor"})
+            return
+        monitor = self.server.monitor
+        with store.connect(monitor.database) as db:
+            db.execute("BEGIN")
+            report = system_checks.read(db, monitor.settings).get("antivirus")
+            result = reviews.list_findings(db, status, int(before) if before is not None else None, report)
+        self.reply(200, result)
 
     def do_POST(self):
         if not self.authorized(mutation=True):

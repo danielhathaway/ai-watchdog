@@ -66,6 +66,50 @@ class SystemChecksTests(unittest.TestCase):
         with patch.object(checks.subprocess, "run", side_effect=FileNotFoundError):
             self.assertEqual("missing-scanner", checks.antivirus_readiness(published)["state"])
 
+    def test_antivirus_coverage_distinguishes_limits_access_and_malware(self):
+        marker = "\n----------- SCAN SUMMARY -----------\n"
+        limit = "Heuristics.Limits.Exceeded.MaxFileSize"
+        outputs = {
+            "/clean": (0, "", "Scanned files: 2\nInfected files: 0\n"),
+            "/denied": (2, "/denied: Can't open directory.\n", "Scanned files: 0\nTotal errors: 1\n"),
+            "/limited": (2, f"/limited/large: {limit} FOUND\n", "Scanned files: 0\nInfected files: 0\nTotal errors: 1\n"),
+            "/old-limit": (1, f"/old-limit/large: {limit} FOUND\n", "Scanned files: 1\nInfected files: 1\n"),
+            "/mixed": (1, f"/mixed/large: {limit} FOUND\n/mixed/test: Eicar-Test-Signature FOUND\n",
+                       "Scanned files: 1\nInfected files: 1\nTotal errors: 1\n"),
+            "/found-text": (2, "/found-text/name: Fake-Signature FOUND\n", "Scanned files: 0\nInfected files: 0\n"),
+        }
+
+        def run(arguments, **options):
+            self.assertIn("--alert-exceeds-max=yes", arguments)
+            self.assertGreater(options["timeout"], 0)
+            code, findings, summary = outputs[arguments[-1]]
+            options["stdout"].write((findings + marker + summary).encode())
+            return subprocess.CompletedProcess(arguments, code)
+
+        with patch.object(checks.subprocess, "run", side_effect=run):
+            report = checks.antivirus(["/clean", "/denied", "/limited", "/old-limit"])
+            self.assertEqual("warn", report["status"])
+            coverage = {row["path"]: row for row in report["coverage"]}
+            self.assertEqual(2, coverage["/clean"]["files_scanned"])
+            self.assertEqual(1, coverage["/denied"]["access_errors"])
+            self.assertEqual(2, report["limit_hits"])
+            self.assertEqual("warn", coverage["/old-limit"]["status"])
+            detected = checks.antivirus(["/mixed", "/denied"])
+            self.assertEqual("fail", detected["status"])
+            self.assertIn("Eicar-Test-Signature FOUND", detected["detail"])
+            self.assertNotIn(limit, detected["detail"])
+            self.assertEqual(1, detected["limit_hits"])
+            self.assertEqual("warn", checks.antivirus(["/found-text"])["status"])
+
+    def test_antivirus_uses_one_scan_timeout_for_all_paths(self):
+        with patch.object(checks.time, "monotonic", side_effect=[0, 0, checks.ANTIVIRUS_TIMEOUT]), \
+             patch.object(checks.subprocess, "run", side_effect=subprocess.TimeoutExpired("clamscan", 900)) as scanner:
+            report = checks.antivirus(["/first", "/remaining"])
+        scanner.assert_called_once()
+        self.assertEqual("warn", report["status"])
+        self.assertEqual(["/first", "/remaining"], [row["path"] for row in report["coverage"]])
+        self.assertIn("before this path was scanned", report["coverage"][1]["detail"])
+
     def test_manual_antivirus_scan_shares_the_worker_and_preserves_the_alert(self):
         config = self.directory / "config.json"
         with store.connect(self.database) as db:

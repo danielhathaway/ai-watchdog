@@ -14,6 +14,7 @@
     <nav aria-label="Dashboard">
       <a href="#overview" data-page="overview" aria-current="page"><span aria-hidden="true">◫</span>Overview</a>
       <a href="#activity" data-page="activity"><span aria-hidden="true">≋</span>Activity</a>
+      <a href="#findings" data-page="findings"><span aria-hidden="true">△</span>Open findings</a>
       <a href="#devices" data-page="devices"><span aria-hidden="true">◇</span>Devices</a>
       <a href="#sensors" data-page="sensors"><span aria-hidden="true">◉</span>Sensors</a>
       <a href="#settings" data-page="settings"><span aria-hidden="true">⚙</span>Settings</a>
@@ -86,6 +87,24 @@
           <ul class="events" id="all-events"></ul>
         </div>
       </section>
+      <section id="findings" class="page" hidden>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Malware findings</h2>
+            <label>Review status <select id="finding-status">
+              <option value="open">Open</option><option value="unreviewed">Unreviewed</option>
+              <option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option>
+              <option value="all">All findings</option>
+            </select></label>
+          </div>
+          <ul class="events" id="finding-events"></ul>
+          <div class="finding-pager">
+            <button type="button" id="finding-newer" class="text-button" disabled>Newer</button>
+            <span id="finding-page" aria-live="polite"></span>
+            <button type="button" id="finding-older" class="text-button" disabled>Older</button>
+          </div>
+        </div>
+      </section>
       <section id="devices" class="page" hidden>
         <div class="panel">
           <div class="panel-head"><div><h2>Known neighbors</h2><p>Devices learned from the kernel neighbor cache</p></div></div>
@@ -113,6 +132,10 @@
           </div>
           <dl id="antivirus-readiness" class="check-results"></dl>
           <dl id="antivirus-checks" class="check-results"></dl>
+          <details class="interface-detail" id="antivirus-coverage" hidden>
+            <summary>Coverage by scan path</summary>
+            <dl id="antivirus-path-results" class="check-results"></dl>
+          </details>
         </section>
         <div class="panel">
           <div class="panel-head"><h2>Known vulnerabilities</h2></div>

@@ -49,10 +49,17 @@ class EicarBrowser(BrowserSmoke):
         """
         call("POST", element("[data-page='activity']") + "/click", {})
         event_id = int(wait_for(activity_alert, "the high-severity EICAR alert in Activity"))
-        alert = f'#all-events > li[data-event-id="{event_id}"]'
+        call("POST", element("[data-page='findings']") + "/click", {})
+        alert = f'#finding-events > li[data-event-id="{event_id}"]'
+        wait_for(f"return !document.querySelector('#findings').hidden && document.querySelector('{alert}')",
+                 "the detection in Open findings")
+        call("POST", element("#finding-status option[value='unreviewed']") + "/click", {})
+        wait_for(f"return document.querySelector('{alert} button')?.textContent === 'Acknowledge'",
+                 "the unreviewed detection")
         call("POST", element(f"{alert} button") + "/click", {})
+        call("POST", element("#finding-status option[value='acknowledged']") + "/click", {})
         wait_for(f"return document.querySelector('{alert}')?.innerText.includes('Acknowledged')",
-                 "acknowledged status on the original detection")
+                 "the original detection in acknowledged findings")
         call("POST", element("[data-page='sensors']") + "/click", {})
         wait_for("""
             const readiness = document.querySelector('#antivirus-readiness').innerText;
@@ -67,19 +74,31 @@ class EicarBrowser(BrowserSmoke):
             return document.querySelector('#antivirus-checks strong')?.textContent === 'Clean' &&
                 /No malware reported across 1 scanned files/.test(document.querySelector('#antivirus-checks').innerText);
         """, "a clean scan after clicking Scan now", timeout=110)
-        call("POST", element("[data-page='activity']") + "/click", {})
-        self.assertEqual(event_id, int(wait_for(activity_alert, "the original EICAR alert after the clean rescan")))
+        call("POST", element("#antivirus-coverage summary") + "/click", {})
+        wait_for("""
+            const coverage = document.querySelector('#antivirus-coverage');
+            return coverage.open && coverage.innerText.includes(SCAN_SCOPE) &&
+                coverage.innerText.includes('Files counted by ClamAV: 1');
+        """.replace("SCAN_SCOPE", repr(self.scope)), "the coverage counts for the clean path")
+        call("POST", element("[data-page='findings']") + "/click", {})
         wait_for(f"return document.querySelector('{alert} button')?.textContent === 'Resolve with clean scan'",
                  "the clean scan resolution action")
         call("POST", element(f"{alert} button") + "/click", {})
+        wait_for(f"return !document.querySelector('{alert}')", "the resolved detection leaving the open queue")
+        call("POST", element("#finding-status option[value='resolved']") + "/click", {})
         resolved = f'''const row = document.querySelector('{alert}');
             return row?.innerText.includes('Resolved') && row.innerText.includes('Clean scan') &&
                 row.innerText.includes('No malware reported across 1 scanned files') &&
                 row.innerText.includes('Eicar-Test-Signature FOUND');'''
         wait_for(resolved, "resolution evidence alongside the original detection")
         call("POST", "/refresh", {})
+        wait_for("return !document.querySelector('#findings').hidden && !document.querySelector('#dashboard').hidden",
+                 "the findings view after reloading")
+        call("POST", element("#finding-status option[value='resolved']") + "/click", {})
         wait_for(resolved, "the preserved detection and resolution after a reload")
-        print(f"Firefox acknowledged and resolved EICAR event {event_id} with linked, retained scan evidence.")
+        call("POST", element("[data-page='activity']") + "/click", {})
+        self.assertEqual(event_id, int(wait_for(activity_alert, "the original EICAR alert in Activity")))
+        print(f"Firefox reviewed EICAR event {event_id} in Open findings and verified it remained in Activity.")
 
 
 def main(work, ssh_port, dashboard_port, mode):
