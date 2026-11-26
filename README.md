@@ -144,7 +144,7 @@ The installer registers a local dpkg diversion so package updates install the ve
 
 The installer registers a dpkg post-update hook. If dpkg installs a fresh copy of the packaged AppArmor profile, the hook restores the read rule and reloads the enforced profile before dpkg returns. The hook checks the package's conffile checksum and preserves the rest of the updated profile. Rerun `install` with the same interface to add the hook to an existing managed setup.
 
-After a `wsdd` or AppArmor update, run the check below. It verifies the hook, diversion, launcher hash, vendor file, exact read rule, enforced profile, and packaged program startup. Watchdog also checks the launcher and rule on its scheduled health cadence and reports drift in **Sensors**. If the hook warns that it could not restore the rule, review the profile and run the check before restarting discovery.
+After a `wsdd` or AppArmor update, run the check below. It verifies the hook, diversion, launcher hash, vendor file, exact read rule, enforced profile, and packaged program startup. Watchdog also checks the launcher and rule on its scheduled health cadence and reports drift in **Sensors**. Its file integrity baseline tracks the hook and both installed helper files. Refresh the baseline after verifying an intentional installation or update of these files. If the hook warns that it could not restore the rule, review the profile and run the check before restarting discovery.
 
 ```sh
 sudo ./deploy/install-wsdd-wifi.sh check

@@ -19,6 +19,7 @@ APP = Path(__file__).resolve().parent
 SSHD = Path("/usr/sbin/sshd")
 UDP_INSTALL = Path("/opt/ai-watchdog-udp")
 MULTICAST_INSTALL = Path("/opt/ai-watchdog-multicast")
+WSDD_DPKG_HOOK = Path("/etc/dpkg/dpkg.cfg.d/90-ai-watchdog-wsdd")
 SYSTEM_UNITS = Path("/etc/systemd/system")
 GROUPS = {"health": ("health_check_minutes", 5), "hardening": ("hardening_check_minutes", 60)}
 PROBE_ERRORS = (OSError, ValueError, KeyError, TypeError, RecursionError, subprocess.SubprocessError)
@@ -32,6 +33,10 @@ KERNEL_SETTINGS = {
 
 def result(key, name, status, detail):
     return {"id": key, "name": name, "status": status, "detail": detail}
+
+
+def wsdd_hook_files():
+    return {WSDD_DPKG_HOOK, *(wsdd_policy.STATE.parent / name for name in ("manage.py", "wsdd_policy.py"))}
 
 
 def targets(config, directory):
@@ -52,6 +57,9 @@ def targets(config, directory):
     if MULTICAST_INSTALL.is_dir():
         paths.update(MULTICAST_INSTALL / name for name in ("multicast_collector.py", "multicast.bt"))
         units.extend(SYSTEM_UNITS / f"ai-watchdog-multicast@.{suffix}" for suffix in ("service", "timer"))
+    hook_files = wsdd_hook_files()
+    if any(os.path.lexists(item) for item in hook_files | {wsdd_policy.STATE}):
+        paths.update(hook_files)
     for unit in units:
         paths.add(unit)
         paths.update(unit.with_name(unit.name + ".d").glob("*.conf"))
@@ -82,12 +90,15 @@ def integrity(path, config, directory):
         return result("files", name, "fail", "The Watchdog file baseline is unreadable or invalid.")
 
     current = {str(item) for item in targets(config, directory)}
+    hook_files = {str(item) for item in wsdd_hook_files()}
     changed = sorted(current - expected.keys())
     unreadable = []
     for filename, saved in expected.items():
         try:
-            if fingerprint(filename) != saved:
+            if (filename in hook_files and not wsdd_policy.trusted_file(Path(filename))) or fingerprint(filename) != saved:
                 changed.append(filename)
+        except FileNotFoundError:
+            changed.append(filename)
         except (OSError, ValueError):
             unreadable.append(filename)
     if changed:
@@ -95,7 +106,10 @@ def integrity(path, config, directory):
     if unreadable:
         return result("files", name, "unknown", f"{len(unreadable)} files could not be verified: "
                       + ", ".join(unreadable[:8]))
-    return result("files", name, "pass", f"{len(expected)} files match the trusted baseline.")
+    detail = f"{len(expected)} files match the trusted baseline."
+    if hook_files <= expected.keys():
+        detail += " The wsdd dpkg hook and both helper files match."
+    return result("files", name, "pass", detail)
 
 
 def health(monitor):

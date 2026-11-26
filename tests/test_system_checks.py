@@ -172,6 +172,31 @@ udp UNCONN 0 0 *:10001 *:* users:(("wsdd",pid=2,fd=8)) ino:51 sk:ba cgroup:/user
             baseline.chmod(0o666)
             self.assertIn("invalid", checks.integrity(baseline, tracked, self.directory)["detail"])
 
+    def test_integrity_tracks_wsdd_dpkg_hook_and_helpers(self):
+        baseline = self.directory / "watchdog-integrity.json"
+        config = self.directory / "config.json"
+        hook = self.directory / "dpkg-hook"
+        manifest = self.directory / "policy.json"
+        helper = self.directory / "manage.py"
+        with patch.object(checks, "WSDD_DPKG_HOOK", hook), \
+             patch.object(checks.wsdd_policy, "STATE", manifest), \
+             patch.object(checks.wsdd_policy, "trusted_file", side_effect=lambda path: bool(path.lstat())):
+            paths = checks.wsdd_hook_files()
+            self.assertTrue(paths.isdisjoint(checks.targets(config, self.directory)))
+            for path in paths:
+                path.write_text("trusted")
+            checks.record_baseline(baseline, config, self.directory)
+            finding = checks.integrity(baseline, config, self.directory)
+            self.assertEqual("pass", finding["status"])
+            self.assertIn("dpkg hook and both helper files match", finding["detail"])
+            hook.write_text("changed")
+            helper.unlink()
+            finding = checks.integrity(baseline, config, self.directory)
+            self.assertEqual("fail", finding["status"])
+            self.assertIn("2 added or changed files", finding["detail"])
+            self.assertIn(str(hook), finding["detail"])
+            self.assertIn(str(helper), finding["detail"])
+
     def test_health_reports_stale_heartbeat_and_insecure_state(self):
         settings = configuration(self.directory / "missing.json")
         config = self.directory / "config.json"
