@@ -460,7 +460,10 @@ function renderSystemChecks() {
               const outbound = Object.entries(socket.multicast_send).map(([family, value]) =>
                 `${family === "ipv4" ? "IPv4" : "IPv6"} ${value.interface || value.address || `ifindex ${value.index}`}`);
               const send = outbound.join(", ") || (socket.socket_options_available ? "No interface reported" : "Unavailable");
-              sockets.append(element("li", `Receive scope: ${socket.receive_interface || "Unverified"} · Multicast send: ${send}`));
+              const memberships = (socket.multicast_memberships ?? []).map(({family, interface: name, index}) =>
+                `IPv${family} ${name || `ifindex ${index}`}`);
+              sockets.append(element("li", `Receive scope: ${socket.receive_interface || "Unverified"} · Multicast send: ${send}`
+                + (memberships.length ? ` · Multicast memberships: ${memberships.join(", ")}` : "")));
             }
             item.append(sockets);
           }

@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Observe multicast socket options for one UID using the UDP iterator.
+iter:udp
+{
+  if (ctx->udp_sk != 0 && ctx->uid == $1) {
+    $udp = ctx->udp_sk;
+    $socket = $udp->inet.sk.sk_socket;
+    if ($socket != 0 && $socket->file != 0) {
+      $inode = $socket->file->f_inode->i_ino;
+      $cookie = $udp->inet.sk.__sk_common.skc_cookie.counter;
+      $v6 = $udp->inet.pinet6;
+      $send6 = 0;
+      if ($udp->inet.sk.__sk_common.skc_family == 10 && $v6 != 0) {
+        $send6 = $v6->mcast_oif;
+      }
+      if ($inode != 0 && $cookie != 0) {
+        printf("S %llu %llu %d %d %d\n", $inode, $cookie, $udp->inet.sk.__sk_common.skc_bound_dev_if, $udp->inet.mc_index, $send6);
+        $member4 = $udp->inet.mc_list;
+        unroll(8) {
+          if ($member4 != 0) {
+            printf("M %llu %llu 4 %d\n", $inode, $cookie, $member4->multi.imr_ifindex);
+            $member4 = $member4->next_rcu;
+          }
+        }
+        if ($udp->inet.sk.__sk_common.skc_family == 10 && $v6 != 0) {
+          $member6 = $v6->ipv6_mc_list;
+          unroll(8) {
+            if ($member6 != 0) {
+              printf("M %llu %llu 6 %d\n", $inode, $cookie, $member6->ifindex);
+              $member6 = $member6->next;
+            }
+          }
+        }
+      }
+    }
+  }
+}

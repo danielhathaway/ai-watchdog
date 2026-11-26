@@ -116,6 +116,14 @@ Watchdog displays the interface from a reported socket scope or a uniquely assig
 
 UDP inventories record multicast send and receive-scope evidence per socket. On supported Linux architectures, Watchdog reads multicast send options when the kernel permits access to the owning process. The dashboard shows **Unavailable** when that access is restricted. Watchdog leaves the host's ptrace policy in effect.
 
+An optional read-only helper uses the Linux BPF UDP iterator to read multicast send interfaces and group membership interfaces for the monitor's UID. It needs a kernel with BTF and UDP iterator support and a compatible bpftrace installation. Install it locally as follows.
+
+```sh
+sudo ./deploy/install-multicast.sh "$(id -un)"
+```
+
+The helper refreshes a root-owned runtime snapshot approximately every minute. Watchdog matches recent evidence to the live socket's inode and kernel cookie. The helper does not require ptrace access or change host security settings. Reported send interfaces and multicast memberships do not establish exclusive receive scope.
+
 Record the Watchdog file baseline from trusted files. For the observe-only installation, run this from the checkout as the monitor user.
 
 ```sh

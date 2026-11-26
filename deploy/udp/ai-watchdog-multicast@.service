@@ -1,0 +1,19 @@
+[Unit]
+Description=AI Watchdog read-only UDP multicast snapshot for UID %i
+ConditionPathExists=/sys/kernel/btf/vmlinux
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I -B /opt/ai-watchdog-multicast/multicast_collector.py %i
+TimeoutStartSec=45s
+RuntimeDirectory=ai-watchdog-multicast-%i
+RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH CAP_CHOWN
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+LimitMEMLOCK=infinity

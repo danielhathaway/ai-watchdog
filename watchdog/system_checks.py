@@ -18,6 +18,7 @@ from .sensors import IP, fingerprint
 APP = Path(__file__).resolve().parent
 SSHD = Path("/usr/sbin/sshd")
 UDP_INSTALL = Path("/opt/ai-watchdog-udp")
+MULTICAST_INSTALL = Path("/opt/ai-watchdog-multicast")
 SYSTEM_UNITS = Path("/etc/systemd/system")
 GROUPS = {"health": ("health_check_minutes", 5), "hardening": ("hardening_check_minutes", 60)}
 PROBE_ERRORS = (OSError, ValueError, KeyError, TypeError, RecursionError, subprocess.SubprocessError)
@@ -48,6 +49,9 @@ def targets(config, directory):
     if UDP_INSTALL.is_dir():
         paths.update((UDP_INSTALL / "collector.py", UDP_INSTALL / "udp.bt"))
         units.append(SYSTEM_UNITS / "ai-watchdog-udp@.service")
+    if MULTICAST_INSTALL.is_dir():
+        paths.update(MULTICAST_INSTALL / name for name in ("multicast_collector.py", "multicast.bt"))
+        units.extend(SYSTEM_UNITS / f"ai-watchdog-multicast@.{suffix}" for suffix in ("service", "timer"))
     for unit in units:
         paths.add(unit)
         paths.update(unit.with_name(unit.name + ".d").glob("*.conf"))
@@ -131,11 +135,12 @@ def health(monitor):
     ]
 
 
-LISTENER_INVENTORY_VERSION = 3
+LISTENER_INVENTORY_VERSION = 4
 MAX_MULTICAST_PROBES = 256
 SS_PROCESS = re.compile(r'\("([^"]+)",pid=(\d+),fd=(\d+)\)')
 SS_CGROUP = re.compile(r"\bcgroup:(/\S*)")
 SS_INODE = re.compile(r"\bino:(\d+)")
+SS_COOKIE = re.compile(r"\bsk:([0-9a-fA-F]+)(?=\s|$)")
 PYTHON_PROCESS = re.compile(r"python(?:\d+(?:\.\d+)?)?")
 
 
@@ -201,13 +206,20 @@ def multicast_details(inode, scope, options, addresses, indices):
         send["ipv4"] = {"address": address, "interface": listener_interface(
             ipaddress.ip_address(address), "", addresses, indices
         )}
+    if options and (index := options.get("ipv4_index")):
+        send["ipv4"] = {"index": index, "interface": indices.get(str(index))}
     if options and (index := options.get("ipv6")):
         send["ipv6"] = {"index": index, "interface": indices.get(str(index))}
+    memberships = [
+        {"family": family, "index": index, "interface": indices.get(str(index))}
+        for family, index in sorted({tuple(pair) for pair in (options or {}).get("memberships", [])})
+    ]
     return {"inode": inode, "receive_interface": receive_interface, "multicast_send": send,
-            "socket_options_available": options is not None}
+            "multicast_memberships": memberships,
+            "socket_options_source": (options or {}).get("source"), "socket_options_available": options is not None}
 
 
-def listeners(output, allowed=(), rules=(), interfaces=None):
+def listeners(output, allowed=(), rules=(), interfaces=None, helper=None):
     entries = {}
     apps = {}
     probes = 0
@@ -247,7 +259,9 @@ def listeners(output, allowed=(), rules=(), interfaces=None):
         match = SS_INODE.search(metadata)
         inode = int(match[1]) if match else None
         socket_apps = set()
-        options = None
+        cookie = SS_COOKIE.search(metadata)
+        options = (multicast.helper_options(helper, inode, cookie[1])
+                   if protocol == "udp" and helper and cookie else None)
         for name, pid, fd in SS_PROCESS.findall(metadata):
             pid = int(pid)
             if pid not in apps:
@@ -276,7 +290,7 @@ def port_check(allowed, rules=()):
     name = "Non-loopback listening ports"
     try:
         output = execute(SS, "-H", "-lntu", "-p", "-e")
-        entries = listeners(output, set(allowed), rules, interface_lookup())
+        entries = listeners(output, set(allowed), rules, interface_lookup(), multicast.helper_snapshot())
     except PROBE_ERRORS:
         return {**result("ports", name, "unknown", "Listening sockets could not be inventoried."),
                 "inventory_version": LISTENER_INVENTORY_VERSION}

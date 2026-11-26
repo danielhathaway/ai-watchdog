@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from deploy.udp.multicast_collector import parse_output
 from watchdog import store, system_checks as checks
 from watchdog.common import BOOT_ID, configuration, write_json
 
@@ -123,6 +124,35 @@ udp UNCONN 0 0 *:10002 *:* users:(("wsdd",pid=2,fd=10)) ino:54 cgroup:/user.slic
         self.assertTrue(scoped["allowed"])
         self.assertEqual("wlp5s0", scoped["sockets"][0]["receive_interface"])
         self.assertEqual("nordlynx", scoped["sockets"][0]["multicast_send"]["ipv6"]["interface"])
+
+    def test_kernel_helper_matches_socket_cookie_and_never_allows_from_membership(self):
+        snapshot = parse_output("S 51 185 3 4 0\nM 51 185 4 3\nM 51 185 6 4\n")
+        output = """udp UNCONN 0 0 *:10000 *:* users:(("wsdd",pid=2,fd=7)) ino:51 sk:b9 cgroup:/user.slice/gvfs-daemon.service
+udp UNCONN 0 0 *:10001 *:* users:(("wsdd",pid=2,fd=8)) ino:51 sk:ba cgroup:/user.slice/gvfs-daemon.service
+"""
+        rule = {"service": "gvfs-daemon.service", "interface": "wlp5s0", "app": "wsdd"}
+        with patch.object(checks.multicast, "socket_options", return_value=None) as probe:
+            current, reused = checks.listeners(output, rules=[rule], helper=snapshot,
+                                               interfaces=({}, {"3": "wlp5s0", "4": "nordlynx"}))
+        probe.assert_called_once_with(2, 8, 51)
+        self.assertFalse(current["allowed"])
+        socket = current["sockets"][0]
+        self.assertIsNone(socket["receive_interface"])
+        self.assertEqual("kernel helper", socket["socket_options_source"])
+        self.assertEqual("nordlynx", socket["multicast_send"]["ipv4"]["interface"])
+        self.assertEqual(["wlp5s0", "nordlynx"], [item["interface"] for item in socket["multicast_memberships"]])
+        self.assertFalse(reused["sockets"][0]["socket_options_available"])
+
+    def test_kernel_helper_rejects_stale_and_user_writable_snapshots(self):
+        path = self.directory / "snapshot.json"
+        sockets = {"51:b9": {"bound": 0, "ipv4": 3, "ipv6": 0, "memberships": []}}
+        path.write_text(json.dumps({"at": 50, "sockets": sockets}))
+        info = SimpleNamespace(st_uid=0, st_mode=0o100440)
+        with patch.object(checks.multicast.os, "fstat", return_value=info):
+            self.assertEqual(sockets, checks.multicast.helper_snapshot(path, now=51))
+            self.assertEqual({}, checks.multicast.helper_snapshot(path, now=151))
+            info.st_mode = 0o100460
+            self.assertEqual({}, checks.multicast.helper_snapshot(path, now=51))
 
     def test_integrity_flags_drift_new_files_and_unsafe_baseline(self):
         baseline = self.directory / "watchdog-integrity.json"
