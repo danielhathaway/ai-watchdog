@@ -59,6 +59,7 @@ port = int(sys.argv[1])
 state = Path(".watchdog")
 scope = Path.home() / "Downloads" / "Watchdog Scan"
 scope.mkdir(mode=0o700, parents=True)
+(scope / "benign.txt").write_text("Benign file for the clean antivirus rescan.\n")
 sample = scope / "eicar.com.txt"
 # The official 68-byte EICAR test string. The guest only writes it as text.
 sample.write_bytes(b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*")

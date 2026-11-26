@@ -7,7 +7,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 
-from watchdog import monitor, store
+from watchdog import monitor, store, system_checks
 from watchdog.server import Console
 
 TOKEN = "integration-test-only-token"
@@ -105,6 +105,24 @@ class ConsoleIntegrationTests(unittest.TestCase):
             self.assertEqual(200, code)
             self.assertEqual(completed["assessment"], snapshot["assessment"])
             self.assertEqual(completed["device_count"], snapshot["device_count"])
+
+    def test_antivirus_request_requires_authorization_and_rejects_duplicate_work(self):
+        with running_console(self.database, workers=False) as console:
+            path = "/api/antivirus/scan"
+            self.assertEqual(503, request(console, "POST", path)[0])
+            console.monitor.ready.set()
+            self.assertEqual(409, request(console, "POST", path)[0])
+            console.monitor.settings["antivirus_paths"] = ["/downloads"]
+            console.monitor.antivirus = system_checks.AntivirusWorker(console.monitor)
+            self.assertEqual(401, request(console, "POST", path, authorized=False)[0])
+            self.assertEqual(403, request(console, "POST", path, headers={"Origin": "http://other.test"})[0])
+            self.assertEqual(400, request(console, "POST", path, body=b'{"path":"/"}')[0])
+            self.assertEqual(202, request(console, "POST", path)[0])
+            self.assertEqual(429, request(console, "POST", path)[0])
+            _, snapshot, _ = request(console, "GET", "/api/status")
+            status = snapshot["system_checks"]["antivirus"]
+            self.assertTrue(status["running"])
+            self.assertEqual(["/downloads"], status["paths"])
 
     def test_scheduler_fires_overdue_check_after_reopening_the_database(self):
         with running_console(self.database, workers=False) as console:

@@ -36,6 +36,7 @@ class SystemChecksTests(unittest.TestCase):
             (0, "Scanned files: 0\n", "skipped", "did not scan any files"),
             (1, "Infected files: 1\nTotal errors: 1\n", "fail", "test-signature FOUND"),
             (2, "", "warn", "could not complete"),
+            (0, "Scanned files: 2\nTotal errors: 1\n", "warn", "could not complete"),
         ):
             with self.subTest(code=code, status=status):
                 findings = f"{target}/sample: test-signature FOUND\n" if code == 1 else ""
@@ -44,6 +45,7 @@ class SystemChecksTests(unittest.TestCase):
                     row = checks.antivirus([str(target)])
                 self.assertEqual(status, row["status"])
                 self.assertIn(detail, row["detail"])
+                self.assertEqual(int("Total errors:" in output), row["scan_errors"])
 
         for failure, detail in ((FileNotFoundError(), "not found"), (subprocess.TimeoutExpired("clamscan", 900), "exceeded")):
             with patch.object(checks.subprocess, "run", side_effect=failure):
@@ -51,7 +53,20 @@ class SystemChecksTests(unittest.TestCase):
             self.assertEqual("warn", row["status"])
             self.assertIn(detail, row["detail"])
 
-    def test_antivirus_results_use_the_configured_paths_and_existing_alerts(self):
+    def test_antivirus_readiness_reads_the_daily_signature_timestamp(self):
+        published = 1795588019
+        output = "ClamAV 1.5.4/28194/Wed Nov 25 06:26:59 2026\n"
+        with patch.object(checks.subprocess, "run", return_value=SimpleNamespace(stdout=output)) as run:
+            self.assertEqual({"state": "ready", "engine": "ClamAV 1.5.4", "signatures_at": published,
+                              "signature_version": "28194"}, checks.antivirus_readiness(published + 3600))
+            self.assertEqual("UTC", run.call_args.kwargs["env"]["TZ"])
+            self.assertEqual("stale-signatures", checks.antivirus_readiness(published + 8 * 86400)["state"])
+        with patch.object(checks.subprocess, "run", return_value=SimpleNamespace(stdout="ClamAV 1.5.4\n")):
+            self.assertEqual("missing-signatures", checks.antivirus_readiness(published)["state"])
+        with patch.object(checks.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertEqual("missing-scanner", checks.antivirus_readiness(published)["state"])
+
+    def test_manual_antivirus_scan_shares_the_worker_and_preserves_the_alert(self):
         config = self.directory / "config.json"
         with store.connect(self.database) as db:
             self.assertNotIn("antivirus", checks.read(db, configuration(config)))
@@ -59,26 +74,49 @@ class SystemChecksTests(unittest.TestCase):
         paths = [str(self.directory / "incoming")]
         write_json(config, {"antivirus_paths": paths})
         settings = configuration(config)
-        row = checks.result("clamav", "ClamAV malware scan", "fail", "test-signature FOUND")
-        monitor = SimpleNamespace(database=self.database, settings=settings, stop=Mock(), ready=Mock())
-        monitor.stop.wait.side_effect = [False, False, False, True]
-        with patch.object(checks, "antivirus", return_value=row) as antivirus, \
-             patch.object(checks.time, "time", side_effect=[100, 100, 200, 86500, 86500]):
-            checks.run(monitor, antivirus_only=True)
-        self.assertEqual(2, antivirus.call_count)
-        antivirus.assert_called_with(paths)
+        detection = checks.result("clamav", "ClamAV malware scan", "fail", "test-signature FOUND")
+        clean = checks.result("clamav", "ClamAV malware scan", "pass", "No malware reported.")
+        worker = checks.AntivirusWorker(SimpleNamespace(database=self.database, settings=settings))
+        with patch.object(checks, "antivirus", return_value=detection) as scanner, \
+             patch.object(checks.time, "time", return_value=100):
+            worker.scan_if_due()
+            scanner.assert_called_once_with(paths)
+
+        def scan(received_paths):
+            self.assertEqual(paths, received_paths)
+            self.assertFalse(worker.request())
+            return clean
+
+        with patch.object(checks, "antivirus", side_effect=scan) as scanner, \
+             patch.object(checks.time, "time", return_value=200):
+            worker.scan_if_due()
+            scanner.assert_not_called()
+            self.assertTrue(worker.request())
+            self.assertFalse(worker.request())
+            worker.scan_if_due()
+            scanner.assert_called_once()
         with store.connect(self.database) as db:
             report = checks.read(db, settings)["antivirus"]
             self.assertEqual(1440, report["interval_minutes"])
-            self.assertEqual(86500, report["at"])
-            self.assertEqual([row], report["checks"])
-            self.assertEqual(("high", "ClamAV detected malware"),
-                             tuple(db.execute("SELECT severity, title FROM events").fetchone()))
+            self.assertEqual(200, report["at"])
+            self.assertEqual([clean], report["checks"])
+            state = worker.status(report, 200)
+            self.assertFalse(state["running"])
+            self.assertEqual(86600, state["next_at"])
+            self.assertEqual(paths, state["paths"])
+            self.assertEqual([("high", "ClamAV detected malware"), ("info", "ClamAV malware scan: pass")],
+                             [tuple(row) for row in db.execute("SELECT severity, title FROM events ORDER BY id")])
             self.assertEqual(1, db.execute("SELECT count(*) FROM email_outbox").fetchone()[0])
             self.assertNotIn("at", checks.read(db, {**settings, "antivirus_paths": ["/other"]})["antivirus"])
         write_json(config, {"antivirus_paths": ["relative/path"]})
         with self.assertRaisesRegex(ValueError, "antivirus_paths"):
             configuration(config)
+
+    def test_incomplete_antivirus_scans_are_retried_early(self):
+        report = {"at": 200, "boot_id": BOOT_ID, "interval_minutes": 1440}
+        for check in ({"status": "warn"}, {"status": "fail", "scan_errors": 2}):
+            self.assertEqual(500, checks.antivirus_next_at({**report, "checks": [check]}, 200))
+        self.assertEqual(200, checks.antivirus_next_at({**report, "boot_id": "previous"}, 200))
 
     def test_listener_allowlist_ignores_both_loopbacks(self):
         output = """tcp LISTEN 0 128 127.0.0.1:8765 0.0.0.0:*

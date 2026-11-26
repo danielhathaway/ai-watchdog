@@ -23,8 +23,8 @@ class EicarBrowser(BrowserSmoke):
             result = call("POST", "/element", {"using": "css selector", "value": selector})
             return "/element/" + result["element-6066-11e4-a52e-4f735466cecf"]
 
-        def wait_for(script, description):
-            deadline = time.monotonic() + 20
+        def wait_for(script, description, timeout=20):
+            deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 value = call("POST", "/execute/sync", {"script": script, "args": []})
                 if value:
@@ -37,8 +37,7 @@ class EicarBrowser(BrowserSmoke):
         call("POST", element("#token") + "/value", {"text": self.token})
         call("POST", element("#unlock button") + "/click", {})
         wait_for("return !document.querySelector('#dashboard').hidden", "the unlocked dashboard")
-        call("POST", element("[data-page='activity']") + "/click", {})
-        alert = wait_for(r"""
+        activity_alert = r"""
             if (document.querySelector('#activity').hidden) return null;
             const entry = [...document.querySelectorAll('#all-events > li')].find(row =>
                 row.getClientRects().length &&
@@ -46,8 +45,28 @@ class EicarBrowser(BrowserSmoke):
                 row.querySelector('[aria-label="High severity"]') &&
                 /eicar\.com\.txt: [^\n]*eicar[^\n]* FOUND/i.test(row.innerText));
             return entry?.innerText;
-        """, "the high-severity EICAR alert in Activity")
+        """
+        call("POST", element("[data-page='activity']") + "/click", {})
+        alert = wait_for(activity_alert, "the high-severity EICAR alert in Activity")
         print("Firefox Activity verified:", " | ".join(alert.splitlines()))
+        call("POST", element("[data-page='sensors']") + "/click", {})
+        wait_for("""
+            const readiness = document.querySelector('#antivirus-readiness').innerText;
+            return !document.querySelector('#sensors').hidden &&
+                readiness.includes('Ready') && readiness.includes('Signature age') &&
+                readiness.includes('/home/ubuntu/Downloads/Watchdog Scan') &&
+                document.querySelector('#antivirus-check-time').innerText.includes('Next scan') &&
+                document.querySelector('#antivirus-checks strong')?.textContent === 'Detection';
+        """, "antivirus readiness and the original detection")
+        call("POST", element("#scan-antivirus") + "/click", {})
+        wait_for("""
+            return document.querySelector('#antivirus-checks strong')?.textContent === 'Clean' &&
+                /No malware reported across 1 scanned files/.test(document.querySelector('#antivirus-checks').innerText);
+        """, "a clean scan after clicking Scan now", timeout=110)
+        call("POST", element("[data-page='activity']") + "/click", {})
+        retained = wait_for(activity_alert, "the original EICAR alert after the clean rescan")
+        self.assertEqual(alert, retained)
+        print("Firefox verified a clean rescan and the retained EICAR alert.")
 
 
 def main(work, ssh_port, dashboard_port):

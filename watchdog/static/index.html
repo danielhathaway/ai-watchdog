@@ -107,7 +107,11 @@
           <dl id="hardening-checks" class="check-results"></dl>
         </section>
         <section class="panel" id="antivirus-panel" hidden>
-          <div class="panel-head"><div><h2>Antivirus</h2><p id="antivirus-check-time"></p></div></div>
+          <div class="panel-head">
+            <div><h2>Antivirus</h2><p id="antivirus-check-time" role="status"></p></div>
+            <button id="scan-antivirus" type="button" disabled>Scan now</button>
+          </div>
+          <dl id="antivirus-readiness" class="check-results"></dl>
           <dl id="antivirus-checks" class="check-results"></dl>
         </section>
         <div class="panel">

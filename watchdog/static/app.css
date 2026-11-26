@@ -77,6 +77,8 @@ dl div{display:flex;justify-content:space-between;align-items:center;padding:12p
 .check-results dt{flex:0 0 35%;overflow-wrap:anywhere}
 .check-results dd{text-align:right;overflow-wrap:anywhere}
 .check-results dd span{display:block;margin-top:4px;color:var(--muted)}
+#antivirus-panel dd{text-transform:none}
+#antivirus-panel .scan-paths{white-space:pre-line}
 .listener-inventory{margin-top:8px}
 .listener-inventory summary{cursor:pointer}
 .listener-inventory ul{padding-inline-start:18px;text-align:left}

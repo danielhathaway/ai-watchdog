@@ -19,6 +19,7 @@ on:
       - 'tests/smoke/eicar_*'
       - 'tests/test_browser_smoke.py'
       - 'tests/test_console_integration.py'
+      - 'tests/test_system_checks.py'
   pull_request:
     paths: *eicar-paths
   workflow_dispatch:

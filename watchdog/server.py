@@ -192,6 +192,9 @@ class Handler(BaseHTTPRequestHandler):
                 data["email"] = notifications.status(db)
                 data["vulnerabilities"] = vulnerabilities.summary(db)
                 data["system_checks"] = system_checks.read(db, monitor.settings)
+            if monitor.antivirus:
+                report = data["system_checks"]["antivirus"]
+                data["system_checks"]["antivirus"] = monitor.antivirus.status(report, now)
             data.update({
                 "now": now, "ready": monitor.ready.is_set(), "response": monitor.response(),
                 "assessing": self.server.assessing, "interval": monitor.settings["interval"],
@@ -203,12 +206,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized(mutation=True):
             return
-        if self.path != "/api/check":
+        if self.path not in {"/api/check", "/api/antivirus/scan"}:
             self.reply(404, {"error": "Not found"})
         elif self.headers.get("Content-Length", "0") != "0" or self.headers.get("Transfer-Encoding"):
             self.reply(400, {"error": "Unexpected body"})
         elif not self.server.monitor.ready.is_set():
             self.reply(503, {"error": "Monitoring is starting"})
+        elif self.path == "/api/antivirus/scan":
+            worker = self.server.monitor.antivirus
+            if worker is None:
+                self.reply(409, {"error": "Antivirus scanning is disabled"})
+            elif worker.request():
+                self.reply(202, {"status": "running"})
+            else:
+                self.reply(429, {"error": "An antivirus scan is already queued or running"})
         elif self.server.assess():
             self.reply(202, {"status": "running"})
         else:

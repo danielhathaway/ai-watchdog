@@ -12,6 +12,7 @@ const pages = {overview: "Overview", activity: "Activity", devices: "Devices", s
 let token = sessionStorage.getItem("watchdog-token") || "";
 let snapshot = null;
 let pending = false;
+let antivirusPending = false;
 let generation = 0;
 let accessFailed = false;
 let scheduleEdited = false;
@@ -429,9 +430,10 @@ function render() {
 function renderSystemChecks() {
   const labels = {pass: "Passed", warn: "Review", fail: "Failed", unknown: "Unavailable", skipped: "Skipped"};
   const colors = {pass: "good-text", warn: "warning-text", fail: "bad-text"};
-  const antivirusEnabled = Boolean(snapshot.system_checks?.antivirus);
-  get("antivirus-panel").hidden = !antivirusEnabled;
-  for (const group of antivirusEnabled ? ["health", "hardening", "antivirus"] : ["health", "hardening"]) {
+  const antivirus = snapshot.system_checks?.antivirus;
+  get("antivirus-panel").hidden = !antivirus;
+  if (antivirus) renderAntivirus(antivirus);
+  for (const group of ["health", "hardening"]) {
     const report = snapshot.system_checks?.[group];
     const target = get(`${group}-checks`);
     const listenersOpen = target.querySelector(".listener-inventory")?.open ?? false;
@@ -479,6 +481,46 @@ function renderSystemChecks() {
     });
     target.replaceChildren(...rows);
   }
+}
+
+function renderAntivirus(report) {
+  const {readiness, running, next_at: next, paths, checks} = report;
+  const labels = {
+    checking: "Checking", ready: "Ready", "missing-scanner": "ClamAV is unavailable",
+    "missing-signatures": "Waiting for signatures", "stale-signatures": "Signatures are stale",
+    unavailable: "Unable to check signatures",
+  };
+  const activity = running ? "Scan in progress" : next <= snapshot.now ? "Scan due now" : `Next scan ${fullDate(next)}`;
+  text("antivirus-check-time", activity + (report.at ? ` · Last run ${fullDate(report.at)}` : ""));
+  get("scan-antivirus").disabled = antivirusPending || running || !snapshot.ready;
+  const hours = Math.max(0, Math.floor((snapshot.now - readiness.signatures_at) / 3600));
+  const signatureAge = readiness.signatures_at == null ? "Unavailable" : hours < 24 ? `${hours} h` : `${Math.floor(hours / 24)} d`;
+  const values = [
+    ["Readiness", labels[readiness.state], readiness.state === "ready" ? "good-text" : "warning-text"],
+    ["Signature age", signatureAge, readiness.state === "stale-signatures" ? "warning-text" : ""],
+    ["Scan paths", paths.join("\n"), "scan-paths"],
+    ["Coverage", "ClamAV skips symlinks and nested mounts and applies file and archive limits."],
+  ];
+  get("antivirus-readiness").replaceChildren(...values.map(([name, value, style]) => {
+    const row = element("div");
+    row.append(element("dt", name), element("dd", value, style));
+    return row;
+  }));
+  const scan = checks?.[0];
+  const outcomes = {pass: "Clean", fail: "Detection", warn: "Incomplete scan", skipped: "No files scanned"};
+  const style = {pass: "good-text", fail: "bad-text", warn: "warning-text"};
+  const result = element("div");
+  const detail = element("dd");
+  detail.append(element("strong", scan ? outcomes[scan.status] : "No scan recorded", style[scan?.status]));
+  if (scan) {
+    detail.append(element("span", scan.detail));
+    if (scan.scan_errors) detail.append(element("span", `Scan errors: ${number.format(scan.scan_errors)}`));
+    if (scan.status !== "pass" && scan.files_scanned != null) {
+      detail.append(element("span", `Files scanned: ${number.format(scan.files_scanned)}`));
+    }
+  }
+  result.append(element("dt", "Last result"), detail);
+  get("antivirus-checks").replaceChildren(result);
 }
 
 function renderSettings() {
@@ -560,6 +602,20 @@ get("unlock").addEventListener("submit", (event) => {
   refresh();
 });
 get("lock").addEventListener("click", () => lock());
+get("scan-antivirus").addEventListener("click", async () => {
+  antivirusPending = true;
+  get("scan-antivirus").disabled = true;
+  const before = generation;
+  announce("");
+  try {
+    await api("/api/antivirus/scan", "POST");
+  } catch (error) {
+    if (before === generation) announce(error.message);
+  } finally {
+    antivirusPending = false;
+    if (before === generation) await refresh();
+  }
+});
 get("run").addEventListener("click", async () => {
   pending = true;
   get("run").disabled = true;

@@ -80,7 +80,7 @@ qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$work/guest.qcow2" 12G
 cp -- "$variables" "$work/vars.fd"
 
 echo "Booting a fresh Ubuntu VM for the Watchdog installer and EICAR check."
-timeout --kill-after=10s 600 qemu-system-x86_64 -machine q35 -accel kvm -accel tcg \
+timeout --kill-after=10s 720 qemu-system-x86_64 -machine q35 -accel kvm -accel tcg \
     -cpu max -m 2560 -smp 2 -display none -monitor none -serial "file:$work/guest.log" -no-reboot \
     -drive "if=pflash,format=raw,readonly=on,file=$firmware" \
     -drive "if=pflash,format=raw,file=$work/vars.fd" \

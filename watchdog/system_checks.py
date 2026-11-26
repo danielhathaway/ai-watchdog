@@ -7,7 +7,9 @@ import re
 import stat
 import subprocess
 import tempfile
+import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import multicast, store, wsdd_policy
@@ -20,6 +22,8 @@ APP = Path(__file__).resolve().parent
 SSHD = Path("/usr/sbin/sshd")
 CLAMSCAN = "/usr/bin/clamscan"
 ANTIVIRUS_TIMEOUT = 900
+ANTIVIRUS_SIGNATURE_MAX_DAYS = 7
+ANTIVIRUS_RETRY_SECONDS = 300
 UDP_INSTALL = Path("/opt/ai-watchdog-udp")
 MULTICAST_INSTALL = Path("/opt/ai-watchdog-multicast")
 WSDD_DPKG_HOOK = Path("/etc/dpkg/dpkg.cfg.d/90-ai-watchdog-wsdd")
@@ -393,13 +397,37 @@ def hardening(settings):
             *(kernel_check(key, minimum) for key, minimum in KERNEL_SETTINGS.items())]
 
 
+def antivirus_readiness(now):
+    try:
+        output = subprocess.run(
+            [CLAMSCAN, "--version"], capture_output=True, text=True, errors="replace", check=True,
+            timeout=3, env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
+        ).stdout.strip()
+    except FileNotFoundError:
+        return {"state": "missing-scanner"}
+    except (OSError, subprocess.SubprocessError):
+        return {"state": "unavailable"}
+    engine, build, date = (output.split("/", 2) + ["", ""])[:3]
+    if not engine.startswith("ClamAV "):
+        return {"state": "unavailable"}
+    if not build and not date:
+        return {"state": "missing-signatures", "engine": engine}
+    try:
+        published = datetime.strptime(date, "%a %b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return {"state": "unavailable", "engine": engine}
+    state = "stale-signatures" if now - published > ANTIVIRUS_SIGNATURE_MAX_DAYS * 86400 else "ready"
+    return {"state": state, "engine": engine, "signatures_at": published, "signature_version": build}
+
+
 def antivirus(paths):
     name = "ClamAV malware scan"
     try:
         with tempfile.TemporaryFile() as output:
             scan = subprocess.run(
                 [CLAMSCAN, "--infected", "--recursive", "--cross-fs=no", "--follow-dir-symlinks=0",
-                 "--follow-file-symlinks=0", "--official-db-only=yes", "--fail-if-cvd-older-than=7", "--", *paths],
+                 "--follow-file-symlinks=0", "--official-db-only=yes",
+                 f"--fail-if-cvd-older-than={ANTIVIRUS_SIGNATURE_MAX_DAYS}", "--", *paths],
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, timeout=ANTIVIRUS_TIMEOUT,
                 env={**os.environ, "LC_ALL": "C"},
             )
@@ -415,26 +443,29 @@ def antivirus(paths):
     except OSError:
         return result("clamav", name, "warn", "Watchdog could not run ClamAV or collect its report.")
 
+    fields = dict(re.findall(r"^(Scanned files|Infected files|Total errors): (\d+)$", summary, re.MULTILINE))
+    scanned = int(fields["Scanned files"]) if "Scanned files" in fields else None
+    errors = int(fields.get("Total errors", 0))
+    coverage = {"files_scanned": scanned, "scan_errors": errors}
     if scan.returncode == 1:
         findings = sorted({line[:512] for line in lines if line.endswith(" FOUND")})
-        count = re.search(r"^Infected files: (\d+)$", summary, re.MULTILINE)
-        errors = re.search(r"^Total errors: [1-9]\d*$", summary, re.MULTILINE)
-        detail = f"ClamAV reported {count[1]} infected files." if count else "ClamAV reported malware."
+        count = fields.get("Infected files")
+        detail = f"ClamAV reported {count} infected files." if count else "ClamAV reported malware."
         if findings:
             detail += " " + " · ".join(findings[:5])
         if errors:
             detail += " Some files could not be scanned."
-        return result("clamav", name, "fail", detail)
-    if scan.returncode != 0:
+        return {**result("clamav", name, "fail", detail), **coverage}
+    if scan.returncode != 0 or errors:
         diagnostic = next((line.strip()[:300] for line in lines if "ERROR:" in line or line.startswith("WARNING:")), "")
         detail = f"ClamAV could not complete the scan (exit {scan.returncode})."
-        return result("clamav", name, "warn", (detail + " " + diagnostic).rstrip())
-    count = re.search(r"^Scanned files: (\d+)$", summary, re.MULTILINE)
-    if not count:
+        return {**result("clamav", name, "warn", (detail + " " + diagnostic).rstrip()), **coverage}
+    if scanned is None:
         return result("clamav", name, "warn", "ClamAV did not provide a scan summary.")
-    if not int(count[1]):
-        return result("clamav", name, "skipped", "ClamAV did not scan any files in the configured paths.")
-    return result("clamav", name, "pass", f"No malware reported across {count[1]} scanned files.")
+    if not scanned:
+        return {**result("clamav", name, "skipped", "ClamAV did not scan any files in the configured paths."), **coverage}
+    detail = f"No malware reported across {scanned} scanned files."
+    return {**result("clamav", name, "pass", detail), **coverage}
 
 
 def read(db, settings):
@@ -478,12 +509,74 @@ def save(database, group, now, rows, *, paths=None):
         store.property_set(db, "system_checks", saved)
 
 
-def run(monitor, *, antivirus_only=False):
-    paths = monitor.settings.get("antivirus_paths") if antivirus_only else None
-    collectors = (
-        (("antivirus", lambda: [antivirus(paths)]),) if antivirus_only else
-        (("health", lambda: health(monitor)), ("hardening", lambda: hardening(monitor.settings)))
-    )
+def antivirus_next_at(report, now):
+    at = report.get("at", 0)
+    if report.get("boot_id") != BOOT_ID or not 0 < at <= now:
+        return now
+    interval = report["interval_minutes"] * 60
+    if any(row["status"] == "warn" or row.get("scan_errors") for row in report["checks"]):
+        interval = min(interval, ANTIVIRUS_RETRY_SECONDS)
+    return at + interval
+
+
+class AntivirusWorker:
+    def __init__(self, monitor):
+        self.monitor = monitor
+        self.paths = monitor.settings["antivirus_paths"]
+        self.lock = threading.Lock()
+        self.requested = threading.Event()
+        self.running = False
+        self.readiness = {"state": "checking"}
+
+    def request(self):
+        with self.lock:
+            if self.running or self.requested.is_set():
+                return False
+            self.requested.set()
+            return True
+
+    def status(self, report, now):
+        with self.lock:
+            return {**report, "paths": self.paths, "readiness": self.readiness,
+                    "running": self.running or self.requested.is_set(), "next_at": antivirus_next_at(report, now)}
+
+    def scan_if_due(self):
+        with store.connect(self.monitor.database) as db:
+            report = read(db, self.monitor.settings)["antivirus"]
+        now = time.time()
+        with self.lock:
+            if self.running or (not self.requested.is_set() and now < antivirus_next_at(report, now)):
+                return
+            self.running = True
+            self.requested.clear()
+        try:
+            row = antivirus(self.paths)
+            save(self.monitor.database, "antivirus", time.time(), [row], paths=self.paths)
+        finally:
+            with self.lock:
+                self.running = False
+
+    def run(self):
+        next_probe = 0
+        while not self.monitor.stop.is_set():
+            if not self.monitor.ready.is_set():
+                self.monitor.stop.wait(1)
+                continue
+            try:
+                if time.monotonic() >= next_probe:
+                    readiness = antivirus_readiness(time.time())
+                    with self.lock:
+                        self.readiness = readiness
+                    next_probe = time.monotonic() + 60
+                self.scan_if_due()
+            except Exception:
+                logging.exception("Antivirus check failed")
+                self.monitor.stop.wait(5)
+            self.requested.wait(5)
+
+
+def run(monitor):
+    collectors = (("health", lambda: health(monitor)), ("hardening", lambda: hardening(monitor.settings)))
     while not monitor.stop.wait(5):
         if not monitor.ready.is_set():
             continue
@@ -504,7 +597,7 @@ def run(monitor, *, antivirus_only=False):
                 except Exception:
                     logging.exception("Scheduled %s checks failed", group)
                     continue
-                save(monitor.database, group, time.time(), rows, paths=paths)
+                save(monitor.database, group, time.time(), rows)
         except Exception:
             logging.exception("Scheduled system checks failed")
             monitor.stop.wait(55)
