@@ -29,6 +29,7 @@ DEFAULTS = {
     "health_check_minutes": 5,
     "backup_upload_max_hours": 26,
     "backup_drill_max_hours": 170,
+    "backup_verifier_max_minutes": 20,
     "hardening_check_minutes": 60,
     "antivirus_paths": [],
     "antivirus_check_minutes": 1440,
@@ -54,6 +55,7 @@ def configuration(path=CONFIG):
         ("startup_grace", 10, 600), ("retention_days", 1, 365),
         ("health_check_minutes", 1, 10080), ("hardening_check_minutes", 1, 10080),
         ("backup_upload_max_hours", 2, 720), ("backup_drill_max_hours", 2, 2160),
+        ("backup_verifier_max_minutes", 5, 1440),
         ("antivirus_check_minutes", 5, 10080),
     ):
         if type(settings[key]) is not int or not low <= settings[key] <= high:

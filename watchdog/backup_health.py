@@ -58,7 +58,7 @@ def record(job, now, environment):
     write_json(STATE / f"{job}.json", result, mode=0o644)
 
 
-def refresh(database, now, upload_hours, drill_hours):
+def refresh(database, now, upload_hours, drill_hours, verifier_minutes):
     observations = {}
     configs = {**JOBS, "verifier": VERIFIER_CONFIG["import"]}
     for job, config in configs.items():
@@ -99,12 +99,30 @@ def refresh(database, now, upload_hours, drill_hours):
                     store.event(db, now, "info", "backup", "Scheduled backup uploads recovered",
                                 "A verified encrypted upload completed.", "upload")
             else:
+                if job == "verifier":
+                    review_reporting(db, now, row, prior, verifier_minutes)
                 if job == "verifier" and prior.get("verifier") and row.get("verifier") != prior["verifier"]:
                     prior = {}
                 review_drill(db, now, job, row, prior, success, failure, drill_hours)
             updated[job] = row
         if updated != previous:
             store.property_set(db, "backup_health", updated)
+
+
+def review_reporting(db, now, row, prior, minutes):
+    reported = row.get("reported_at", 0)
+    deadline = (reported or row["since"]) + minutes * 60
+    row["report_deadline"] = deadline
+    was_overdue = prior.get("report_status") == "overdue"
+    overdue = now >= deadline or (was_overdue and reported <= prior.get("reported_at", 0))
+    row["report_status"] = "overdue" if overdue else "current" if reported else "waiting"
+    if overdue and not was_overdue:
+        store.event(db, now, "medium", "backup", "Verifier reports overdue",
+                    "The primary dashboard has no recent authenticated report. Check the verifier and import service journals.",
+                    "verifier-reporting")
+    elif was_overdue and not overdue:
+        store.event(db, now, "info", "backup", "Verifier reporting resumed",
+                    "The primary dashboard received a fresh authenticated report.", "verifier-reporting")
 
 
 def review_drill(db, now, job, row, prior, success, failure, hours):

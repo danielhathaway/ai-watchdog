@@ -35,7 +35,8 @@ class BrowserSmoke(unittest.TestCase):
                         store.property_set(db, "coverage_email_delivery", {"last_accepted_at": now - 60})
                         store.property_set(db, "backup_health", {"upload": {"status": "overdue", "deadline": now - 60},
                                                                  "verifier": {"status": "failed", "failure_at": now - 30,
-                                                                              "verifier": "verifier-test", "reported_at": now}})
+                                                                              "verifier": "verifier-test", "reported_at": now - 1300,
+                                                                              "report_status": "overdue", "report_deadline": now - 100}})
                     listener.bind(("127.0.0.1", 0))
                     port = listener.getsockname()[1]
                     listener.close()
@@ -130,6 +131,8 @@ class BrowserSmoke(unittest.TestCase):
         wait_for("!document.querySelector('#backup-health-panel').hidden && "
                  "document.querySelector('#backup-health').innerText.includes('Overdue') && "
                  "document.querySelector('#backup-health').innerText.includes('verifier-test') && "
+                 "document.querySelector('#backup-health').innerText.includes('Reports overdue') && "
+                 "document.querySelector('#backup-health').innerText.includes('Report deadline') && "
                  "document.querySelector('#backup-health').innerText.includes('Last run failed')")
         wait_for("document.querySelector('#vulnerability-status').textContent.includes('No scan recorded')")
         wait_for("document.querySelector('#health-check-time').textContent.includes('Every 5 min') && "

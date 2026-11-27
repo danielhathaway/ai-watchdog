@@ -99,7 +99,7 @@ class BackupHealthTests(unittest.TestCase):
     def refresh(self, now):
         with patch.object(backup_health, "CONFIG", self.config), patch.object(backup_health, "receipt", self.receipts.get), \
              patch.object(backup_health, "read_record", return_value=self.verifier_report):
-            backup_health.refresh(self.database, now, 2, 2)
+            backup_health.refresh(self.database, now, 2, 2, 5)
         with store.connect(self.database) as db:
             report = store.property_get(db, "backup_health", {})
             events = [row[0] for row in db.execute("SELECT title FROM events ORDER BY id")]
@@ -149,10 +149,33 @@ class BackupHealthTests(unittest.TestCase):
         report, events = self.refresh(7301)
         self.assertEqual("overdue", report["verifier"]["status"])
         self.assertIn("Verifier restore drill overdue", events)
+        self.assertIn("Verifier reports overdue", events)
         self.verifier_report = {"verifier": "test-verifier", "sent_at": 7303, "success_at": 7302}
         report, events = self.refresh(7304)
         self.assertEqual(("healthy", "test-verifier"), (report["verifier"]["status"], report["verifier"]["verifier"]))
         self.assertIn("Verifier restore drill is current again", events)
+        self.assertIn("Verifier reporting resumed", events)
+
+    def test_verifier_report_outage_is_independent_of_drill_health(self):
+        path = self.config / backup_health.VERIFIER_CONFIG["import"]
+        path.touch(mode=0o600)
+        os.utime(path, (100, 100))
+        report, _ = self.refresh(150)
+        self.assertEqual(("waiting", 400), (report["verifier"]["report_status"], report["verifier"]["report_deadline"]))
+        self.verifier_report = {"verifier": "test-verifier", "sent_at": 160, "success_at": 140}
+        self.refresh(459)
+        self.refresh(460)
+        report, events = self.refresh(470)
+        self.assertEqual(("healthy", "overdue"), (report["verifier"]["status"], report["verifier"]["report_status"]))
+        self.assertEqual(["Verifier reports overdue"], events)
+        self.verifier_report["sent_at"] = 161
+        report, events = self.refresh(480)
+        self.assertEqual("overdue", report["verifier"]["report_status"])
+        self.assertEqual(["Verifier reports overdue"], events)
+        self.verifier_report["sent_at"] = 481
+        report, events = self.refresh(485)
+        self.assertEqual(("current", 140), (report["verifier"]["report_status"], report["verifier"]["success_at"]))
+        self.assertEqual(["Verifier reports overdue", "Verifier reporting resumed"], events)
 
 
 class BackupVerifierTests(unittest.TestCase):

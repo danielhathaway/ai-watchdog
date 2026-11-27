@@ -570,8 +570,16 @@ function renderBackupHealth() {
     const detail = element("dd");
     detail.append(element("strong", labels[report.status], colors[report.status]));
     if (job === "verifier") {
+      const reporting = {current: "Reporting current", waiting: "Waiting for first report", overdue: "Reports overdue"};
+      if (report.report_status) {
+        const channel = element("span");
+        channel.append(element("strong", reporting[report.report_status],
+          report.report_status === "overdue" ? "bad-text" : report.report_status === "current" ? "good-text" : "warning-text"));
+        detail.append(channel);
+      }
       detail.append(element("span", report.reported_at
         ? `${report.verifier} · Last report ${fullDate(report.reported_at)}` : "No verifier report received"));
+      if (report.report_deadline) detail.append(element("span", `Report deadline ${fullDate(report.report_deadline)}`));
     }
     if (report.success_at) detail.append(element("span", `Last successful run ${fullDate(report.success_at)}`));
     if (report.failure_at) detail.append(element("span", `Last failed run ${fullDate(report.failure_at)}`));

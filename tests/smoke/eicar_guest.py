@@ -304,12 +304,16 @@ class Guest:
         job = self.configure_verifier_reports("import")
         overdue = time.time() - 171 * 3600
         os.utime(job, (overdue, overdue))
-        self.check_backup_health("verifier", "overdue", "Verifier restore drill overdue")
+        waiting = self.check_backup_health("verifier", "overdue", "Verifier restore drill overdue")
+        assert waiting["report_status"] == "overdue" and "reported_at" not in waiting, waiting
+        self.check_backup_health("verifier", "overdue", "Verifier reports overdue")
         run_backup_job("verifier@import")
         self.check_backup_health("verifier", "healthy", "Verifier restore drill failed")
         self.check_backup_health("verifier", "healthy", "Verifier restore drill recovered")
         result = self.check_backup_health("verifier", "healthy", "Verifier restore drill is current again")
         assert result["verifier"] == "verifier-smoke" and result["failure_at"] < result["success_at"] <= result["reported_at"]
+        result = self.check_backup_health("verifier", "healthy", "Verifier reporting resumed")
+        assert result["report_status"] == "current" and result["report_deadline"] == result["reported_at"] + 20 * 60
         print("WATCHDOG_EICAR_VERIFIER separate primary dashboard recorded overdue, failed and recovered verifier drills", flush=True)
 
     def scheduled_uploads(self):
