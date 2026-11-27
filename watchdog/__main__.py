@@ -62,6 +62,7 @@ def main():
     operations = vulnerability.add_subparsers(dest="operation", required=True)
     refresh = operations.add_parser("refresh", help="Match public advisories to the installed inventory")
     refresh.add_argument("--ubuntu-archive", type=Path, help="Use a local copy of Canonical's OSV archive")
+    refresh.add_argument("--kev-catalog", type=Path, help="Use a local copy of CISA's KEV catalog")
     refresh.add_argument("--watchdog-advisories", type=Path, help="Trusted first-party advisory manifest")
     listing = operations.add_parser("list", help="List saved findings")
     listing.add_argument("--all", action="store_true", help="Include findings outside the affected range")
@@ -144,8 +145,9 @@ def main():
                 store.initialize(database)
                 default_manifest = args.directory / "watchdog-advisories.json"
                 manifest = args.watchdog_advisories or (default_manifest if default_manifest.is_file() else None)
-                report = vulnerabilities.refresh(database, archive=args.ubuntu_archive, manifest=manifest)
-                result = {key: value for key, value in report.items() if key != "findings"}
+                report = vulnerabilities.refresh(database, archive=args.ubuntu_archive, manifest=manifest,
+                                                 kev_path=args.kev_catalog)
+                result = {key: value for key, value in report.items() if key not in {"findings", "kev_ids"}}
                 result["unresolved"] = len(vulnerabilities.unresolved(report))
                 print(json.dumps(result, indent=2))
                 if report["errors"]:
@@ -155,7 +157,10 @@ def main():
                 parser.error("Monitor database is missing. Check --directory.")
             with store.connect(database) as db:
                 report = store.property_get(db, "vulnerabilities", {})
-                result = {key: value for key, value in report.items() if key != "findings"}
+                result = {key: value for key, value in report.items() if key not in {"findings", "kev_ids"}}
+                coverage = vulnerabilities.summary(db)
+                result["sources"] = coverage["sources"]
+                result["previous_boot"] = coverage["previous_boot"]
                 result["status"] = "recorded" if report else "not-checked"
                 if not 0 <= args.limit <= 10000:
                     parser.error("--limit must be between 0 and 10000")
@@ -181,7 +186,7 @@ def main():
                     result["matching_findings"] = len(rows)
                     if args.operation == "updates":
                         rows = vulnerabilities.updates(report, rows)
-                        rows.sort(key=lambda row: (row["update_available"] is not True,
+                        rows.sort(key=lambda row: (not row.get("known_exploited"), row["update_available"] is not True,
                                                   row["candidate_meets_fix_threshold"] is not True))
                         result["available_updates"] = sum(row["update_available"] is True for row in rows)
                         result["candidate_checked_at"] = time.time()

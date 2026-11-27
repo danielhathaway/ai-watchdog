@@ -1,6 +1,8 @@
 """Match vendor advisories to local inventory and retain unresolved exposure."""
 import fcntl
 import functools
+import http.client
+import io
 import json
 import lzma
 import platform
@@ -16,10 +18,17 @@ from pathlib import Path
 from urllib.request import urlopen
 
 from . import __version__, store
+from .common import BOOT_ID
 
 UBUNTU_FEED = "https://security-metadata.canonical.com/osv/osv-all.tar.xz"
+KEV_FEED = ("https://raw.githubusercontent.com/cisagov/kev-data/refs/heads/develop/"
+            "known_exploited_vulnerabilities.json")
+STALE_AFTER = 48 * 3600
+KEV_LIMIT = 8 * 1024 * 1024
 UBUNTU_MEMBER = re.compile(r"osv/cve/\d{4}/UBUNTU-(CVE-\d{4}-\d{4,})\.json")
 ADVISORY_ID = re.compile(r"(?:CVE-\d{4}-\d{4,}|WD-[0-9]{4}-[0-9]{3,})")
+KERNEL_RELEASE = re.compile(r"(\d+\.\d+\.\d+-\d+)-([a-z0-9-]+)")
+KERNEL_PACKAGE = re.compile(r"linux-(?:image(?:-unsigned)?|modules(?:-extra)?)-(.+)")
 DEPENDENCIES = {"bpftrace", "iproute2", "nftables", "systemd", "python3-defaults",
                 f"python{sys.version_info.major}.{sys.version_info.minor}", "ollama"}
 LIMIT = 256 * 1024 * 1024
@@ -55,6 +64,47 @@ def package_inventory():
         if status == "installed" and source and source_version and binary_version:
             packages[source].append((binary, source_version, binary_version))
     return packages
+
+
+def kernel_release(binary):
+    match = KERNEL_PACKAGE.fullmatch(binary.partition(":")[0])
+    return match[1] if match and KERNEL_RELEASE.fullmatch(match[1]) else None
+
+
+def running_kernel(release):
+    match = KERNEL_RELEASE.fullmatch(release)
+    if match:
+        try:
+            vendor, build, _ = Path("/proc/version_signature").read_text().split()
+        except (OSError, ValueError):
+            return None
+        suffix = "-" + match[2]
+        version = build.removesuffix(suffix)
+        if vendor == "Ubuntu" and build.endswith(suffix) and version.startswith(match[1] + "."):
+            return version
+    return None
+
+
+def verify_kernel(row, packages, images, history, release, build, ranges):
+    running = KERNEL_RELEASE.fullmatch(release)
+    target = KERNEL_RELEASE.fullmatch(kernel_release(row["component"]))
+    if not build or not running or target[2] != running[2]:
+        return "runtime-unverified"
+    current_versions = {version for binary, version, _ in packages if kernel_release(binary) == release}
+    if not current_versions and not any(kernel_release(old["component"]) == release for old in history):
+        return "runtime-unverified"
+    affected = any(evaluate_range(build, events)[0] for events in ranges)
+    if not affected and build in current_versions and version_compare(build, row["fixed"]) >= 0:
+        return "active"
+    if affected:
+        for binary, version, _ in packages:
+            candidate = kernel_release(binary)
+            if ((candidate, version) in images and KERNEL_RELEASE.fullmatch(candidate)[2] == running[2]
+                    and version_compare(version, row["fixed"]) >= 0
+                    and not any(evaluate_range(version, events)[0] for events in ranges)):
+                return "reboot-required"
+        return "running-affected"
+    return "runtime-unverified" if row["status"] != "affected" else "fix-not-installed"
 
 
 @functools.cache
@@ -112,7 +162,9 @@ def ubuntu_records(archive):
     count = 0
     content_size = 0
     with lzma.open(archive) as source, tarfile.open(fileobj=source, mode="r|", bufsize=256 * 1024) as bundle:
-        for member in bundle:
+        while member := bundle.next():
+            # Older Python versions still cache member metadata in streaming mode.
+            bundle.members.clear()
             content_size += member.size
             if content_size > 24 * 1024 * 1024 * 1024:
                 raise ValueError("Ubuntu advisory archive exceeds the expanded size limit")
@@ -130,9 +182,15 @@ def ubuntu_records(archive):
         raise ValueError("Ubuntu advisory archive contains no CVE records")
 
 
-def ubuntu_findings(archive, ecosystem, packages, existing):
+def ubuntu_findings(archive, ecosystem, packages, existing, release, build):
     findings = {}
     release_present = False
+    history = defaultdict(list)
+    for row in existing.values():
+        if row["source"] == ecosystem and kernel_release(row["component"]):
+            history[row["advisory"], row["source_package"]].append(row)
+    images = {(kernel_release(binary), version) for group in packages.values() for binary, _, version in group
+              if binary.startswith("linux-image-") and kernel_release(binary)}
     for advisory, record in ubuntu_records(archive):
         for entry in record.get("affected", []):
             package = entry["package"]
@@ -140,21 +198,27 @@ def ubuntu_findings(archive, ecosystem, packages, existing):
                 continue
             release_present = True
             source = package["name"]
-            if record.get("withdrawn") or source not in packages:
+            older_kernels = history.get((advisory, source), ())
+            if record.get("withdrawn") or (source not in packages and not older_kernels):
                 continue
             ranges = [item["events"] for item in entry.get("ranges", []) if item["type"] == "ECOSYSTEM"]
             if not ranges:
                 continue
             severity = next((s["score"] for s in record.get("severity", []) if s["type"] == "Ubuntu"), "unknown")
-            for binary, source_version, binary_version in packages[source]:
+            installed = packages.get(source, ())
+            for binary, source_version, binary_version in installed:
                 matches = [fix for affected, fix in (evaluate_range(source_version, r) for r in ranges) if affected]
+                running_matches = ([fix for affected, fix in (evaluate_range(build, r) for r in ranges) if affected]
+                                   if build and kernel_release(binary) == release else [])
                 key = f"{ecosystem}/{advisory}/{binary}"
                 previous = findings.get(key)
                 if previous and previous["status"] in {"affected", "vendor-listed"}:
                     matches.append(previous["fixed"])
-                if not matches and key not in existing:
+                if not matches and not running_matches and key not in existing:
                     continue
                 fixed = existing.get(key, {}).get("fixed") if not matches else None
+                if not matches and running_matches and all(running_matches):
+                    fixed = max(running_matches, key=functools.cmp_to_key(version_compare))
                 if matches and all(matches):
                     fixed = max(matches, key=functools.cmp_to_key(version_compare))
                 status = ("affected" if fixed else "vendor-listed") if matches else "outside-affected-range"
@@ -165,9 +229,33 @@ def ubuntu_findings(archive, ecosystem, packages, existing):
                     "fixed": fixed, "severity": severity, "status": status,
                     "reference": f"https://ubuntu.com/security/{advisory}", "source": ecosystem,
                 }
+                if fixed:
+                    row = findings[key]
+                    if kernel_release(binary):
+                        row["fix_verification"] = verify_kernel(row, installed, images, older_kernels,
+                                                                release, build, ranges)
+                    else:
+                        row["fix_verification"] = installed_fix(row)
+                elif running_matches:
+                    findings[key]["fix_verification"] = "running-affected"
+            installed_binaries = {binary for binary, _, _ in installed} if older_kernels else ()
+            for old in older_kernels:
+                if old["component"] in installed_binaries or not old["fixed"]:
+                    continue
+                row = {**old, "status": "removed"}
+                row["fix_verification"] = verify_kernel(row, installed, images, older_kernels, release, build, ranges)
+                findings[f'{ecosystem}/{advisory}/{row["component"]}'] = row
     if not release_present:
         raise ValueError(f"Ubuntu archive contains no records for {ecosystem}")
     return findings
+
+
+def installed_fix(row):
+    if row["status"] == "affected":
+        return "fix-not-installed"
+    if row["fixed"] and version_compare(row["comparison_version"], row["fixed"]) >= 0:
+        return "installed-runtime-unverified"
+    return "runtime-unverified"
 
 
 def read_local_json(path):
@@ -189,39 +277,67 @@ def watchdog_findings(manifest, existing):
         if affected or key in existing:
             findings[key] = {
                 "advisory": advisory, "component": "ai-watchdog", "scope": "watchdog",
-                "installed": __version__, "comparison_version": __version__, "fixed": fixed,
+                "installed": __version__, "comparison_version": __version__,
+                "fixed": fixed if affected else existing[key]["fixed"],
                 "severity": record.get("severity", "unknown"), "source": "watchdog",
                 "status": ("affected" if fixed else "vendor-listed") if affected else "outside-affected-range",
             }
+            if findings[key]["fixed"]:
+                findings[key]["fix_verification"] = installed_fix(findings[key])
     candidate = manifest.get("available_version")
     if candidate is not None and (not isinstance(candidate, str) or not 0 < len(candidate) <= 256):
         raise ValueError("Invalid Watchdog release version")
     return findings, candidate
 
 
-def download_archive(path):
-    with urlopen(UBUNTU_FEED, timeout=30) as response, path.open("wb") as output:
-        if response.geturl() != UBUNTU_FEED:
-            raise ValueError("Unexpected Ubuntu advisory download URL")
+def download(url, output, limit):
+    with urlopen(url, timeout=30) as response:
+        if response.geturl() != url:
+            raise ValueError("Unexpected advisory download URL")
         deadline = time.monotonic() + 180
         total = 0
-        while chunk := response.read(1024 * 1024):
+        while chunk := response.read1(1024 * 1024):
             total += len(chunk)
-            if total > LIMIT or time.monotonic() > deadline:
-                raise ValueError("Ubuntu advisory download exceeded size or time limit")
+            if total > limit or time.monotonic() > deadline:
+                raise ValueError("Advisory download exceeded size or time limit")
             output.write(chunk)
 
 
-def refresh(database, *, archive=None, manifest=None):
+def download_archive(path):
+    with path.open("wb") as output:
+        download(UBUNTU_FEED, output, LIMIT)
+
+
+def kev_catalog(path):
+    if path is not None:
+        with path.open("rb") as source:
+            payload = source.read(KEV_LIMIT + 1)
+        if len(payload) > KEV_LIMIT:
+            raise ValueError("CISA KEV catalog exceeds the size limit")
+    else:
+        with io.BytesIO() as output:
+            download(KEV_FEED, output, KEV_LIMIT)
+            payload = output.getvalue()
+    data = json.loads(payload)
+    entries = data["vulnerabilities"]
+    if not isinstance(entries, list) or not entries or data["count"] != len(entries):
+        raise ValueError("Invalid CISA KEV catalog size")
+    ids = {entry["cveID"] for entry in entries}
+    if len(ids) != len(entries) or any(not re.fullmatch(r"CVE-\d{4}-\d{4,19}", cve) for cve in ids):
+        raise ValueError("Invalid CISA KEV catalog CVE IDs")
+    return sorted(ids)
+
+
+def refresh(database, *, archive=None, manifest=None, kev_path=None):
     with database.with_suffix(".vulnerability.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise ValueError("A vulnerability refresh is already running") from error
-        return refresh_locked(database, archive, manifest)
+        return refresh_locked(database, archive, manifest, kev_path)
 
 
-def refresh_locked(database, archive, manifest):
+def refresh_locked(database, archive, manifest, kev_path):
     started = time.time()
     with store.connect(database) as db:
         previous = store.property_get(db, "vulnerabilities", {})
@@ -231,23 +347,39 @@ def refresh_locked(database, archive, manifest):
     checked = set()
     release = os_release()
     ecosystem = ubuntu_ecosystem(release)
+    kernel = platform.release()
+    kernel_build = running_kernel(kernel) if ecosystem else None
+    kernel_check = previous.get("kernel_check", {})
+    kev_ids = previous.get("kev_ids", [])
     packages = None
     errors = []
     if ecosystem:
         try:
             packages = package_inventory()
             with tempfile.TemporaryDirectory(prefix="watchdog-cve-") as directory:
+                local_archive = archive
                 if archive is None:
-                    archive = Path(directory) / "ubuntu.tar.xz"
-                    download_archive(archive)
-                current.update(ubuntu_findings(archive, ecosystem, packages, existing))
+                    local_archive = Path(directory) / "ubuntu.tar.xz"
+                    download_archive(local_archive)
+                current.update(ubuntu_findings(local_archive, ecosystem, packages, existing, kernel, kernel_build))
             checked.add(ecosystem)
-            sources[ecosystem] = {"status": "ready", "checked_at": started, "reference": UBUNTU_FEED}
-        except (OSError, EOFError, ValueError, KeyError, TypeError, lzma.LZMAError, tarfile.TarError, subprocess.SubprocessError) as error:
+            sources[ecosystem] = source_result(sources, ecosystem, started, UBUNTU_FEED, local=archive is not None)
+            sources.pop("os", None)
+            kernel_check = {"release": kernel, "build": kernel_build, "boot_id": BOOT_ID}
+        except (OSError, EOFError, ValueError, KeyError, TypeError, RecursionError, http.client.HTTPException,
+                lzma.LZMAError, tarfile.TarError, subprocess.SubprocessError) as error:
             sources[ecosystem] = {**sources.get(ecosystem, {}), "status": "failed", "attempted_at": started}
             errors.append(f"Ubuntu advisory lookup failed: {error}")
     else:
         sources["os"] = {"status": "unsupported-os", "attempted_at": started}
+    if kev_path is not None or (archive is None and (ecosystem or manifest)):
+        try:
+            kev_ids = kev_catalog(kev_path)
+            sources["kev"] = source_result(sources, "kev", started, KEV_FEED, local=kev_path is not None)
+        except (OSError, ValueError, KeyError, TypeError, RecursionError, http.client.HTTPException) as error:
+            sources["kev"] = {**sources.get("kev", {}), "status": "failed", "attempted_at": started,
+                              "reference": KEV_FEED}
+            errors.append(f"CISA KEV lookup failed: {error}")
     candidate = None
     if manifest:
         try:
@@ -268,29 +400,37 @@ def refresh_locked(database, archive, manifest):
             status = "unverified"
             if old["source"] == ecosystem and old["component"] not in binaries:
                 status = "removed"
-            current[key] = {**old, "status": status}
+            current[key] = {field: value for field, value in old.items() if field != "fix_verification"}
+            current[key]["status"] = status
         elif old["source"] != ecosystem and old["source"] != "watchdog":
-            current[key] = {**old, "status": "unverified"}
+            current[key] = {field: value for field, value in old.items() if field != "fix_verification"}
+            current[key]["status"] = "unverified"
         else:
             current[key] = old
+    exploited = set(kev_ids)
     for key, finding in current.items():
         finding["first_seen"] = existing.get(key, {}).get("first_seen", started)
         if finding["source"] in checked:
             finding["checked_at"] = started
-    report = {"started_at": started, "os": release, "running_kernel": platform.release(), "sources": sources,
-              "findings": current, "watchdog_version": __version__, "watchdog_candidate": candidate, "errors": errors}
+        if finding["advisory"] in exploited:
+            finding["known_exploited"] = True
+        else:
+            finding.pop("known_exploited", None)
+    report = {"started_at": started, "os": release, "kernel_check": kernel_check,
+              "running_kernel": kernel, "running_kernel_build": kernel_build,
+              "sources": sources, "kev_ids": kev_ids, "findings": current, "watchdog_version": __version__,
+              "watchdog_candidate": candidate, "errors": errors}
     with store.connect(database) as db:
         db.execute("BEGIN IMMEDIATE")
         store.property_set(db, "vulnerabilities", report)
-        store.property_set(db, "vulnerability_summary", {
-            "status": "recorded", "unresolved": len(unresolved(report)), "sources": sources,
-        })
+        store.property_set(db, "vulnerability_summary", report_summary(report))
     return report
 
 
 def unresolved(report):
     return [row for row in report.get("findings", {}).values()
-            if row["status"] in {"affected", "vendor-listed", "unverified"}]
+            if (row["status"] in {"affected", "vendor-listed", "unverified"}
+                or row.get("fix_verification") in {"reboot-required", "running-affected"})]
 
 
 def select_findings(report, *, include_all=False, advisory=None, scope=None):
@@ -299,13 +439,81 @@ def select_findings(report, *, include_all=False, advisory=None, scope=None):
     severities = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     return sorted(
         (row for row in rows if (not advisory or row["advisory"] == advisory) and (not scope or row["scope"] == scope)),
-        key=lambda row: (statuses.get(row["status"], 3), severities.get(row["severity"], 4),
+        key=lambda row: (not row.get("known_exploited"), statuses.get(row["status"], 3),
+                         severities.get(row["severity"], 4),
                          row["advisory"], row["component"]),
     )
 
 
-def summary(db):
-    return store.property_get(db, "vulnerability_summary", {"status": "not-checked"})
+def source_result(sources, name, now, reference, *, local):
+    previous = sources.get(name, {})
+    online_at = previous.get("online_at", previous.get("checked_at")) if local else now
+    return {"status": "ready", "checked_at": now, "online_at": online_at, "local": local, "reference": reference}
+
+
+def report_summary(report):
+    matches = select_findings(report)
+    exploited = [row for row in matches if row.get("known_exploited")]
+    fixes = defaultdict(int)
+    for row in report["findings"].values():
+        if state := row.get("fix_verification"):
+            fixes[state] += 1
+    return {"status": "recorded", "unresolved": len(matches), "sources": report["sources"],
+            "known_exploited": len(exploited), "fixes": dict(fixes),
+            "kernel_check": report["kernel_check"],
+            "priority_findings": [{key: row[key] for key in ("advisory", "component", "status", "fixed")}
+                                  | {"fix_verification": row.get("fix_verification")} for row in exploited[:5]]}
+
+
+def feed_status(sources, expected_since, now):
+    def freshness(name, source):
+        if name not in expected_since:
+            return source
+        # Older reports did not distinguish offline imports from public feed refreshes.
+        last = source.get("online_at", source.get("checked_at"))
+        anchor = last if last and last <= now else expected_since[name]
+        if now - anchor >= STALE_AFTER:
+            status = "stale"
+        else:
+            status = "fresh" if last and last <= now else "pending"
+        return {**source, "freshness": status}
+
+    return {name: freshness(name, sources.get(name, {"status": "not-checked"}))
+            for name in dict.fromkeys((*sources, *expected_since))}
+
+
+def check_feed_health(database, expected, now):
+    with store.connect(database) as db:
+        db.execute("BEGIN IMMEDIATE")
+        previous = store.property_get(db, "vulnerability_feed_health", {})
+        previous_since = previous.get("since", {})
+        since = {name: previous_since.get(name, now) for name in expected}
+        sources = store.property_get(db, "vulnerability_summary", {}).get("sources", {})
+        current = feed_status(sources, since, now)
+        stale = sorted(name for name in since if current[name]["freshness"] == "stale")
+        prior_stale = set(previous.get("stale", []))
+        for name in sorted(set(stale) - prior_stale):
+            label = "CISA KEV" if name == "kev" else name
+            store.event(db, now, "medium", "vulnerability-feed", "Vulnerability feed stale",
+                        f"{label} has no successful public refresh within 48 hours.", name)
+        for name in sorted((prior_stale & since.keys()) - set(stale)):
+            label = "CISA KEV" if name == "kev" else name
+            store.event(db, now, "info", "vulnerability-feed", "Vulnerability feed refreshed", label, name)
+        state = {"since": since, "stale": stale}
+        if state != previous:
+            store.property_set(db, "vulnerability_feed_health", state)
+
+
+def summary(db, now=None):
+    saved = store.property_get(db, "vulnerability_summary", {"status": "not-checked"})
+    health = store.property_get(db, "vulnerability_feed_health", {})
+    now = time.time() if now is None else now
+    sources = saved.get("sources", {})
+    since = {name: source.get("attempted_at", source.get("checked_at", now))
+             for name, source in sources.items() if name == "kev" or name.startswith("Ubuntu:")}
+    since.update(health.get("since", {}))
+    return {**saved, "sources": feed_status(sources, since, now),
+            "previous_boot": bool(saved.get("kernel_check") and saved["kernel_check"]["boot_id"] != BOOT_ID)}
 
 
 def apt_candidates(packages):

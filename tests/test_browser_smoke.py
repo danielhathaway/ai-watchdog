@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from test_console_integration import TOKEN, running_console
-from watchdog import notifications, store
+from watchdog import notifications, store, vulnerabilities
 
 
 @unittest.skipUnless(os.environ.get("WATCHDOG_BROWSER_SMOKE") == "1", "Set WATCHDOG_BROWSER_SMOKE=1")
@@ -37,6 +37,14 @@ class BrowserSmoke(unittest.TestCase):
                                                                  "verifier": {"status": "failed", "failure_at": now - 30,
                                                                               "verifier": "verifier-test", "reported_at": now - 1300,
                                                                               "report_status": "overdue", "report_deadline": now - 100}})
+                        store.property_set(db, "vulnerability_summary", {
+                            "status": "recorded", "unresolved": 1, "known_exploited": 1,
+                            "sources": {"kev": {"status": "failed", "online_at": now - vulnerabilities.STALE_AFTER}},
+                            "fixes": {"reboot-required": 1},
+                            "priority_findings": [{"advisory": "CVE-2026-10001", "component": "linux-image-example",
+                                                   "status": "affected", "fixed": "1.2",
+                                                   "fix_verification": "reboot-required"}],
+                        })
                     listener.bind(("127.0.0.1", 0))
                     port = listener.getsockname()[1]
                     listener.close()
@@ -134,7 +142,8 @@ class BrowserSmoke(unittest.TestCase):
                  "document.querySelector('#backup-health').innerText.includes('Reports overdue') && "
                  "document.querySelector('#backup-health').innerText.includes('Report deadline') && "
                  "document.querySelector('#backup-health').innerText.includes('Last run failed')")
-        wait_for("document.querySelector('#vulnerability-status').textContent.includes('No scan recorded')")
+        wait_for("['CISA KEV', 'Stale', 'Refresh failed', 'CVE-2026-10001', 'reboot required'].every("
+                 "label => document.querySelector('#vulnerability-status').innerText.includes(label))")
         wait_for("document.querySelector('#health-check-time').textContent.includes('Every 5 min') && "
                  "document.querySelector('#hardening-check-time').textContent.includes('Every 60 min')")
         click("[data-page='settings']")

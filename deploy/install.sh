@@ -24,6 +24,7 @@ for asset in index.html app.css app.js; do
     install -o root -g root -m 0644 "$source_dir/watchdog/static/$asset" /opt/ai-watchdog/watchdog/static/
 done
 for unit in ai-watchdog.service ai-watchdog-response.service \
+    ai-watchdog-vulnerability-refresh.service ai-watchdog-vulnerability-refresh.timer \
     ai-watchdog-backup-upload.service ai-watchdog-backup-upload.timer \
     ai-watchdog-backup-drill.service ai-watchdog-backup-drill.timer \
     ai-watchdog-backup-verifier@.service ai-watchdog-backup-verifier@.timer; do

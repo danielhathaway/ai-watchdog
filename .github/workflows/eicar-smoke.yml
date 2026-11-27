@@ -10,6 +10,8 @@ on:
       - 'deploy/install-user.sh'
       - 'deploy/install-clamav.sh'
       - 'deploy/ai-watchdog-backup-*'
+      - 'deploy/ai-watchdog.service'
+      - 'deploy/ai-watchdog-vulnerability-refresh.*'
       - 'watchdog/__main__.py'
       - 'watchdog/backups.py'
       - 'watchdog/backup_crypto.py'
@@ -25,6 +27,7 @@ on:
       - 'watchdog/system_checks.py'
       - 'watchdog/server.py'
       - 'watchdog/store.py'
+      - 'watchdog/vulnerabilities.py'
       - 'watchdog/static/**'
       - 'tests/smoke/eicar_*'
       - 'tests/smoke/immutable_webdav.py'
@@ -34,6 +37,7 @@ on:
       - 'tests/test_rollback.py'
       - 'tests/test_backup_jobs.py'
       - 'tests/test_recurring_and_email.py'
+      - 'tests/test_vulnerabilities.py'
   pull_request:
     paths: *eicar-paths
   workflow_dispatch:

@@ -441,6 +441,17 @@ systemd-analyze verify --man=no deploy/*.service deploy/udp/*.service
 
 ## Vulnerability tracking
 
+Both installers include a persistent systemd timer that runs daily while the monitor is installed and its timer is active. The system-wide timer starts with the monitor. After upgrading a running system-wide installation, restart the monitor using the [containment maintenance procedure](#enable-and-verify-containment) to load the new dependency. The desktop installer starts the user timer directly. Each timer uses a separate unprivileged worker with a 384 MiB memory limit. On Ubuntu, it refreshes Canonical OSV and the [CISA Known Exploited Vulnerabilities catalog](https://github.com/cisagov/kev-data). Other distributions can use the optional Watchdog manifest and CISA catalog.
+
+Open **Sensors → Vulnerabilities** for the last successful public refresh of each feed, any refresh failure, the highest-priority known exploited findings, and fix verification. A feed is stale after 48 hours without a successful public refresh. Watchdog records stale and recovered transitions in **Activity**, including when the scheduled job never ran. Failed refreshes preserve the last successful data.
+
+For an immediate scheduled-worker run, use the appropriate command for the installation:
+
+```sh
+systemctl --user start ai-watchdog-observe-vulnerability-refresh.service
+sudo systemctl start ai-watchdog-vulnerability-refresh.service
+```
+
 Run these commands from the checkout. Use the service's state directory if it differs from the default observe-only checkout.
 
 ```sh
@@ -458,9 +469,11 @@ sudo -u ai-watchdog -- python3 -B -m watchdog vulnerabilities refresh
 sudo -u ai-watchdog -- python3 -B -m watchdog vulnerabilities list
 ```
 
-`refresh` matches Canonical's [Ubuntu OSV feed](https://documentation.ubuntu.com/security/security-updates/osv/) against local dpkg source versions, including packaged Watchdog runtime dependencies. It also accepts `--ubuntu-archive PATH` for offline refreshes. Ubuntu archive packages are covered. Snap, manually installed programs, external package feeds, and Ubuntu Pro-only ecosystems are outside current coverage. The download does not send the inventory. The archive is expanded incrementally and can take a few minutes.
+`refresh` matches Canonical's [Ubuntu OSV feed](https://documentation.ubuntu.com/security/security-updates/osv/) against local dpkg source versions, including packaged Watchdog runtime dependencies. It accepts `--ubuntu-archive PATH` and `--kev-catalog PATH` for offline imports. Supplying a local Ubuntu archive suppresses the online CISA download. Offline imports leave public feed freshness unchanged. Ubuntu archive packages are covered. Snap, manually installed programs, external package feeds, and Ubuntu Pro-only ecosystems are outside current coverage. The downloads do not send the inventory. The archive is expanded incrementally and can take a few minutes.
 
 Watchdog records findings, source status and scan time in the monitor database. The Sensors page and active AI check include the saved summary. A failed refresh preserves prior findings. `list --all` includes entries outside the affected range and removed packages. A `vendor-listed` finding has no known fix threshold and may still be awaiting vendor evaluation. APT update candidates reflect locally cached indexes. A missing or incomparable candidate is reported as unknown. Add `--advisory` to focus on one advisory, `--scope dependency` to filter package findings, or `--limit 0` to return all matching rows.
+
+`list` and `updates` put applicable CISA catalog entries first. To verify remediation, run a refresh after installing updates or rebooting, then use `list --all --advisory CVE-YYYY-NNNN` to see the saved fix status. Watchdog checks the installed source version against the vendor's fix threshold. For a supported Ubuntu kernel, it also compares the [running build signature](https://ubuntu.com/kernel#identifying-a-kernel) with the relevant installed kernel build and advisory. A fixed kernel on disk with an affected build still running is reported as requiring a reboot. The console labels evidence from an earlier boot. For userspace packages, Watchdog verifies installation and reports service runtime as unverified. Package and reboot decisions remain under the operator's OS update policy.
 
 To scan Watchdog's own release, place a trusted first-party manifest in `watchdog-advisories.json` in the state directory or pass `--watchdog-advisories PATH`. The optional `available_version` is the current release offered by that manifest. This example uses a fictional advisory.
 

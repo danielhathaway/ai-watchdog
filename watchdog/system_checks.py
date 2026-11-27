@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import backup_health, clamd_backend, multicast, reviews, store, wsdd_policy
+from . import backup_health, clamd_backend, multicast, reviews, store, vulnerabilities, wsdd_policy
 from .common import BOOT_ID, execute, uptime, write_json
 from .process_traffic import SS
 from .responder import heartbeat
@@ -56,12 +56,19 @@ def targets(config, directory):
     units = []
     if directory is None:
         units.extend(SYSTEM_UNITS / f"ai-watchdog{suffix}.service" for suffix in ("", "-response"))
+        units.extend(SYSTEM_UNITS / f"ai-watchdog-vulnerability-refresh.{suffix}" for suffix in ("service", "timer")
+                     if (SYSTEM_UNITS / f"ai-watchdog-vulnerability-refresh.{suffix}").exists())
     else:
         config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
         for suffix in ("", "-supervisor"):
             name = f"ai-watchdog-observe{suffix}.service"
             paths.add(directory / name)
             units.append(config_home / "systemd" / "user" / name)
+        for suffix in ("service", "timer"):
+            name = f"ai-watchdog-observe-vulnerability-refresh.{suffix}"
+            if (directory / name).exists():
+                paths.add(directory / name)
+                units.append(config_home / "systemd" / "user" / name)
     if UDP_INSTALL.is_dir():
         paths.update((UDP_INSTALL / "collector.py", UDP_INSTALL / "udp.bt"))
         units.append(SYSTEM_UNITS / "ai-watchdog-udp@.service")
@@ -690,6 +697,7 @@ class AntivirusWorker:
 def run(monitor):
     collectors = (("health", lambda: health(monitor)), ("hardening", lambda: hardening(monitor.settings)))
     next_backup_check = 0
+    next_feed_check = 0
     while not monitor.stop.wait(5):
         if not monitor.ready.is_set():
             continue
@@ -702,6 +710,15 @@ def run(monitor):
                                           monitor.settings["backup_verifier_max_minutes"])
                 except (OSError, ValueError):
                     logging.exception("Scheduled backup health check failed")
+            if time.monotonic() >= next_feed_check:
+                next_feed_check = time.monotonic() + 60
+                try:
+                    ecosystem = vulnerabilities.ubuntu_ecosystem(vulnerabilities.os_release())
+                    has_manifest = (monitor.database.parent / "watchdog-advisories.json").is_file()
+                    expected = ([ecosystem] if ecosystem else []) + (["kev"] if ecosystem or has_manifest else [])
+                    vulnerabilities.check_feed_health(monitor.database, expected, time.time())
+                except (OSError, ValueError):
+                    logging.exception("Scheduled vulnerability feed health check failed")
             with store.connect(monitor.database) as db:
                 saved = read(db, monitor.settings)
             for group, collect in collectors:

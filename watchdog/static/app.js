@@ -480,17 +480,51 @@ function render() {
   }));
   renderSystemChecks();
   const vulnerability = snapshot.vulnerabilities;
-  const coverage = vulnerability?.status === "recorded" ? Object.entries(vulnerability.sources) : [];
+  const coverage = Object.entries(vulnerability?.sources || {});
   const vulnerabilityRows = [["Unresolved findings",
     vulnerability?.status === "recorded" ? number.format(vulnerability.unresolved) : "No scan recorded"]];
   for (const [source, detail] of coverage) {
-    const name = source === "watchdog" ? "Watchdog advisories" : (source === "os" ? "OS advisories" : source);
-    vulnerabilityRows.push([name, detail.status === "ready" ? fullDate(detail.checked_at)
-      : detail.status.replaceAll("-", " ")]);
+    const name = {watchdog: "Watchdog advisories", os: "OS advisories", kev: "CISA KEV"}[source] || source;
+    const publicCheck = detail.online_at ?? (detail.local === undefined ? detail.checked_at : null);
+    const last = publicCheck ? `Last public refresh ${fullDate(publicCheck)}` : "No public refresh recorded";
+    const warnings = [detail.freshness === "stale" ? "Stale" : "",
+      detail.status === "failed" ? "Refresh failed" : ""].filter(Boolean);
+    const value = detail.freshness
+      ? [...warnings, last, detail.local && detail.checked_at ? `Offline import ${fullDate(detail.checked_at)}` : ""]
+        .filter(Boolean).join(" · ")
+      : detail.status === "ready" ? fullDate(detail.checked_at) : detail.status.replaceAll("-", " ");
+    vulnerabilityRows.push([name, value, warnings.length ? "warning-text" : ""]);
   }
-  get("vulnerability-status").replaceChildren(...vulnerabilityRows.map(([name, value]) => {
+  if (vulnerability?.known_exploited !== undefined) {
+    const fixLabels = {
+      "reboot-required": "Fixed kernel installed, reboot required",
+      "running-affected": "Running kernel still affected",
+      "active": "Kernel fix active",
+      "installed-runtime-unverified": "Fix installed, service runtime unverified",
+      "runtime-unverified": "Kernel runtime unverified",
+      "fix-not-installed": "Fix not installed",
+    };
+    vulnerabilityRows.push(["Known exploited findings", number.format(vulnerability.known_exploited)]);
+    if (vulnerability.kernel_check?.release) {
+      const build = vulnerability.kernel_check.build ? ` · build ${vulnerability.kernel_check.build}` : "";
+      vulnerabilityRows.push(["Kernel at last check", vulnerability.kernel_check.release + build]);
+    }
+    if (vulnerability.previous_boot) {
+      vulnerabilityRows.push(["Fix verification", "Results from a previous boot", "warning-text"]);
+    }
+    for (const [state, count] of Object.entries(vulnerability.fixes)) {
+      vulnerabilityRows.push([fixLabels[state] || state, number.format(count),
+        (state === "reboot-required" || state === "running-affected") ? "warning-text" : ""]);
+    }
+    for (const finding of vulnerability.priority_findings) {
+      const status = [finding.status.replaceAll("-", " "), fixLabels[finding.fix_verification]].filter(Boolean).join(" · ");
+      const fixed = finding.fixed ? ` · fixed version ${finding.fixed}` : "";
+      vulnerabilityRows.push([finding.advisory, `${finding.component} · ${status}${fixed}`, "warning-text"]);
+    }
+  }
+  get("vulnerability-status").replaceChildren(...vulnerabilityRows.map(([name, value, color]) => {
     const row = element("div");
-    row.append(element("dt", name), element("dd", value));
+    row.append(element("dt", name), element("dd", value, color));
     return row;
   }));
   get("blocks").replaceChildren(...(response.blocked.length

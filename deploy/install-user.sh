@@ -22,6 +22,7 @@ fi
 cat > "$state_dir/ai-watchdog-observe.service" <<UNIT
 [Unit]
 Description=AI Watchdog live observe-only monitor
+Wants=ai-watchdog-observe-vulnerability-refresh.timer
 
 [Service]
 WorkingDirectory=$source_dir
@@ -56,6 +57,32 @@ UMask=0077
 WantedBy=default.target
 UNIT
 
+cat > "$state_dir/ai-watchdog-observe-vulnerability-refresh.service" <<UNIT
+[Unit]
+Description=Refresh AI Watchdog user vulnerability advisories
+PartOf=ai-watchdog-observe.service
+After=ai-watchdog-observe.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=$source_dir
+ExecStart=/usr/bin/python3 -B -m watchdog vulnerabilities --directory $state_dir refresh
+TimeoutStartSec=20min
+MemoryHigh=192M
+MemoryMax=384M
+Nice=10
+NoNewPrivileges=yes
+UMask=0077
+UNIT
+
+sed 's/PartOf=ai-watchdog.service/PartOf=ai-watchdog-observe.service/' \
+    "$source_dir/deploy/ai-watchdog-vulnerability-refresh.timer" \
+    > "$state_dir/ai-watchdog-observe-vulnerability-refresh.timer"
+systemctl --user link \
+    "$state_dir/ai-watchdog-observe-vulnerability-refresh.service" \
+    "$state_dir/ai-watchdog-observe-vulnerability-refresh.timer"
+
 systemctl --user enable --now \
     "$state_dir/ai-watchdog-observe.service" \
     "$state_dir/ai-watchdog-observe-supervisor.service"
+systemctl --user start ai-watchdog-observe-vulnerability-refresh.timer

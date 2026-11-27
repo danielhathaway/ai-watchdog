@@ -89,6 +89,7 @@ class VulnerabilitiesTests(unittest.TestCase):
         self.assertEqual([WATCHDOG_ID], [item["advisory"] for item in vuln.unresolved(result)])
         updated = {item["component"]: item for item in result["findings"].values()}
         self.assertEqual("outside-affected-range", updated["iproute2"]["status"])
+        self.assertEqual("installed-runtime-unverified", updated["iproute2"]["fix_verification"])
         self.assertEqual("removed", updated["system-binary"]["status"])
         self.assertEqual(rows["iproute2"]["first_seen"], updated["iproute2"]["first_seen"])
 
@@ -116,6 +117,104 @@ class VulnerabilitiesTests(unittest.TestCase):
         self.assertFalse(updates["other:arm64"]["update_available"])
         self.assertIsNone(updates["other:arm64"]["candidate_meets_fix_threshold"])
         self.assertTrue(updates["ai-watchdog"]["candidate_meets_fix_threshold"])
+
+    def test_kev_prioritizes_applicable_findings_and_survives_failed_refresh(self):
+        archive(self.archive, [affected("iproute2")])
+        catalog = self.directory / "kev.json"
+        catalog.write_text(json.dumps({"count": 2, "vulnerabilities": [
+            {"cveID": CVE}, {"cveID": "CVE-2026-10002"},
+        ]}))
+        inventory = {"iproute2": [("iproute2", "1.0", "1.0")]}
+        with patch.object(vuln, "os_release", return_value=RELEASE), \
+             patch.object(vuln, "package_inventory", return_value=inventory):
+            first = vuln.refresh(self.db, archive=self.archive, manifest=self.manifest, kev_path=catalog)
+            catalog.write_text('{"count": 2, "vulnerabilities": []}')
+            second = vuln.refresh(self.db, archive=self.archive, manifest=self.manifest, kev_path=catalog)
+        self.assertEqual("failed", second["sources"]["kev"]["status"])
+        self.assertEqual(first["sources"]["kev"]["checked_at"], second["sources"]["kev"]["checked_at"])
+        self.assertEqual([CVE, WATCHDOG_ID], [row["advisory"] for row in vuln.select_findings(second)])
+        with store.connect(self.db) as db:
+            summary = vuln.summary(db)
+        self.assertEqual(1, summary["known_exploited"])
+        self.assertEqual(CVE, summary["priority_findings"][0]["advisory"])
+
+    def test_stale_feed_alert_fires_without_a_refresh_and_recovers_once(self):
+        now = time.time()
+        expected = [ECOSYSTEM, "kev"]
+        vuln.check_feed_health(self.db, expected, now)
+        with store.connect(self.db) as db:
+            self.assertEqual("pending", vuln.summary(db, now)["sources"]["kev"]["freshness"])
+        deadline = now + vuln.STALE_AFTER
+        vuln.check_feed_health(self.db, expected, deadline)
+        vuln.check_feed_health(self.db, expected, deadline + 1)
+        with store.connect(self.db) as db:
+            self.assertEqual("stale", vuln.summary(db, deadline)["sources"]["kev"]["freshness"])
+            saved = {"sources": {"kev": vuln.source_result({}, "kev", deadline + 2, vuln.KEV_FEED, local=True)}}
+            store.property_set(db, "vulnerability_summary", saved)
+        vuln.check_feed_health(self.db, expected, deadline + 2)
+        with store.connect(self.db) as db:
+            self.assertEqual("stale", vuln.summary(db, deadline + 2)["sources"]["kev"]["freshness"])
+            saved["sources"]["kev"] = vuln.source_result({}, "kev", deadline + 3, vuln.KEV_FEED, local=False)
+            store.property_set(db, "vulnerability_summary", saved)
+        vuln.check_feed_health(self.db, expected, deadline + 3)
+        vuln.check_feed_health(self.db, expected, deadline + 4)
+        with store.connect(self.db) as db:
+            self.assertEqual("fresh", vuln.summary(db, deadline + 4)["sources"]["kev"]["freshness"])
+            self.assertEqual([("Vulnerability feed stale", ECOSYSTEM), ("Vulnerability feed stale", "kev"),
+                              ("Vulnerability feed refreshed", "kev")],
+                             [tuple(row) for row in db.execute(
+                                 "SELECT title, subject FROM events WHERE kind='vulnerability-feed' ORDER BY id")])
+
+    def test_kernel_verification_distinguishes_installed_and_running_builds(self):
+        archive(self.archive, [affected("linux", fixed="6.8.0-50.51")])
+        release = "6.8.0-50-generic"
+        binary = "linux-image-" + release
+        inventory = {"linux": [(binary, "6.8.0-50.51", "6.8.0-50.51")]}
+        with patch.object(vuln.platform, "release", return_value=release), \
+             patch.object(vuln, "running_kernel", return_value="6.8.0-50.50"):
+            before = self.refresh(inventory, watchdog=False)
+        self.assertEqual("reboot-required", vuln.unresolved(before)[0]["fix_verification"])
+        with patch.object(vuln.platform, "release", return_value=release), \
+             patch.object(vuln, "running_kernel", return_value="6.8.0-50.51"):
+            after = self.refresh(inventory, watchdog=False)
+        self.assertEqual([], vuln.unresolved(after))
+        self.assertEqual("active", next(iter(after["findings"].values()))["fix_verification"])
+        self.archive.write_bytes(b"bad archive")
+        with patch.object(vuln, "BOOT_ID", "new-boot"):
+            self.refresh(inventory, watchdog=False)
+            with store.connect(self.db) as db:
+                self.assertTrue(vuln.summary(db)["previous_boot"])
+
+    def test_kernel_verification_tracks_a_removed_image_still_running(self):
+        archive(self.archive, [affected("linux", fixed="6.8.0-51.51")])
+        old_release = "6.8.0-50-generic"
+        new_release = "6.8.0-51-generic"
+        old_image = ("linux-image-" + old_release, "6.8.0-50.50", "6.8.0-50.50")
+        new_image = ("linux-image-" + new_release, "6.8.0-51.51", "6.8.0-51.51")
+        with patch.object(vuln.platform, "release", return_value=old_release), \
+             patch.object(vuln, "running_kernel", return_value=old_image[1]):
+            self.refresh({"linux": [old_image]}, watchdog=False)
+            pending = self.refresh({"linux": [new_image]}, watchdog=False)
+        row, = vuln.unresolved(pending)
+        self.assertEqual("removed", row["status"])
+        self.assertEqual("reboot-required", row["fix_verification"])
+        with patch.object(vuln.platform, "release", return_value=new_release), \
+             patch.object(vuln, "running_kernel", return_value=new_image[1]):
+            active = self.refresh({"linux": [new_image]}, watchdog=False)
+        self.assertEqual("active", next(iter(active["findings"].values()))["fix_verification"])
+
+    def test_patched_kernel_modules_do_not_imply_the_bootable_image_is_patched(self):
+        archive(self.archive, [affected("linux", fixed="6.8.0-50.51")])
+        release = "6.8.0-50-generic"
+        inventory = {
+            "linux": [("linux-modules-" + release, "6.8.0-50.51", "6.8.0-50.51")],
+            "linux-signed": [("linux-image-" + release, "6.8.0-50.50", "6.8.0-50.50")],
+        }
+        with patch.object(vuln.platform, "release", return_value=release), \
+             patch.object(vuln, "running_kernel", return_value="6.8.0-50.50"):
+            before = self.refresh(inventory, watchdog=False)
+        row, = vuln.unresolved(before)
+        self.assertEqual("running-affected", row["fix_verification"])
 
     def test_passive_evidence_matches_reviewed_rules_only(self):
         archive(self.archive, [affected("iproute2")])
