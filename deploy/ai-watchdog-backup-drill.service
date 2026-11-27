@@ -1,0 +1,23 @@
+[Unit]
+Description=Run an isolated Watchdog restore drill from off-host storage
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/ai-watchdog/backup-drill.json
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+WorkingDirectory=/opt/ai-watchdog
+LoadCredential=job.json:/etc/ai-watchdog/backup-drill.json
+LoadCredential=rclone.conf:/etc/ai-watchdog/backup-drill-rclone.conf
+LoadCredential=identity:/etc/ai-watchdog/backup-drill-identity
+RuntimeDirectory=ai-watchdog-backup-drill
+RuntimeDirectoryMode=0700
+ExecStartPre=/usr/bin/install -m 0600 %d/job.json %d/rclone.conf %d/identity %t/ai-watchdog-backup-drill
+ExecStart=/usr/bin/python3 -B -m watchdog backups drill --job %t/ai-watchdog-backup-drill/job.json
+TimeoutStartSec=30min
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+UMask=0077

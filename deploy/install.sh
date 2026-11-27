@@ -22,7 +22,9 @@ install -o root -g root -m 0644 "$source_dir"/watchdog/*.py /opt/ai-watchdog/wat
 for asset in index.html app.css app.js; do
     install -o root -g root -m 0644 "$source_dir/watchdog/static/$asset" /opt/ai-watchdog/watchdog/static/
 done
-for unit in ai-watchdog.service ai-watchdog-response.service; do
+for unit in ai-watchdog.service ai-watchdog-response.service \
+    ai-watchdog-backup-upload.service ai-watchdog-backup-upload.timer \
+    ai-watchdog-backup-drill.service ai-watchdog-backup-drill.timer; do
     install -o root -g root -m 0644 "$source_dir/deploy/$unit" /etc/systemd/system/
 done
 if [ ! -e /etc/ai-watchdog/config.json ]; then

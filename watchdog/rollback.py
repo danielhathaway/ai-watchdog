@@ -192,8 +192,8 @@ class Deployment:
             return self.replace(source, port)
 
     @contextmanager
-    def maintenance_lock(self):
-        fd = os.open(self.backups / "lock", os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    def maintenance_lock(self, name="lock"):
+        fd = os.open(self.backups / name, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -209,11 +209,13 @@ class Deployment:
         backups.seal(backup, self.desktop)
         return metadata, token
 
-    def create_backup(self):
+    def create_backup(self, workspace=None):
         port = self.preflight()
         with self.maintenance_lock():
             was_active, supervise = self.active(self.monitor), self.active(self.supervisor)
-            backup = Path(tempfile.mkdtemp(dir=self.backups, prefix="backup-"))
+            if workspace is not None:
+                backups.private_directory(workspace)
+            backup = Path(tempfile.mkdtemp(dir=workspace or self.backups, prefix="backup-"))
             copy_package(self.root / "watchdog", backup / "watchdog", root_owned=not self.desktop)
             token = None
             try:

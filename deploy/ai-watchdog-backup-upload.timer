@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily encrypted Watchdog backup upload
+
+[Timer]
+OnCalendar=daily
+Persistent=yes
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

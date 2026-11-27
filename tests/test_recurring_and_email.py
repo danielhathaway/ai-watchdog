@@ -104,6 +104,7 @@ class RecurringAndEmailTests(unittest.TestCase):
             status = notifications.status(db)
             self.assertEqual(0, status["pending"])
             self.assertEqual(105, status["last_sent_at"])
+            self.assertIsNone(status["coverage"]["last_accepted_at"])
 
     def test_pending_email_retries_and_is_cleared_when_recipient_changes(self):
         with store.connect(self.database) as db:
@@ -142,14 +143,35 @@ class RecurringAndEmailTests(unittest.TestCase):
             for at in (160, 170, 180):
                 system_checks.update_coverage_alerts(db, at, [failed])
         notifications.queue_coverage(self.database, settings, [path], 300)
-        with patch.object(notifications.smtplib, "SMTP") as client:
+        with patch.object(notifications, "send", side_effect=ConnectionError):
             notifications.deliver(self.database, settings, 301)
+        with store.connect(self.database) as db:
+            coverage = notifications.status(db)["coverage"]
+            self.assertEqual((1, 361, None), (coverage["pending"], coverage["retry_at"], coverage["last_accepted_at"]))
+        with patch.object(notifications.smtplib, "SMTP") as client:
+            notifications.deliver(self.database, settings, 361)
             message = client.return_value.send_message.call_args.args[0]
             self.assertIn("Antivirus coverage warning", message["Subject"])
             self.assertNotIn(path, message.get_content())
         notifications.queue_coverage(self.database, settings, [path], 1000)
         with store.connect(self.database) as db:
-            self.assertEqual(0, notifications.status(db)["pending"])
+            status = notifications.status(db)["coverage"]
+            self.assertEqual((0, None, 361), (status["pending"], status["retry_at"], status["last_accepted_at"]))
+
+    def test_dashboard_distinguishes_expired_coverage_email_from_ordinary_alerts(self):
+        settings = {**self.email, "coverage_notify_minutes": 1}
+        with store.connect(self.database) as db:
+            notifications.prepare(db, settings)
+            queued = db.execute("INSERT INTO email_outbox(at,severity,title) VALUES (1,'medium','Coverage warning')")
+            db.execute("INSERT INTO coverage_email VALUES (?, ?)", ("/coverage", queued.lastrowid))
+            store.event(db, 10000, "high", "other", "Recent ordinary alert")
+        with patch.object(notifications, "send"):
+            notifications.deliver(self.database, settings, 86402)
+        with store.connect(self.database) as db:
+            status = notifications.status(db)
+            self.assertEqual(86402, status["last_sent_at"])
+            self.assertEqual({"pending": 0, "retry_at": None, "last_accepted_at": None, "last_expired_at": 86402},
+                             status["coverage"])
 
     def test_smtp_password_is_read_only_from_private_regular_file(self):
         path = self.directory / "smtp-password"

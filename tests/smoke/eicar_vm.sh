@@ -18,12 +18,29 @@ fi
 if [[ $mode == system-backup-restore ]]; then
     umask 077
     transfer=$(mktemp -d)
-    trap 'rm -rf -- "$transfer"' EXIT
+    storage=
+    trap 'if [[ -n $storage ]]; then kill "$storage" 2>/dev/null || true; wait "$storage" 2>/dev/null || true; fi; rm -rf -- "$transfer"' EXIT
     keygen=${WATCHDOG_AGE_KEYGEN:-age-keygen}
+    rclone=${WATCHDOG_RCLONE:-rclone}
     "$keygen" -o "$transfer/identity" 2>"$transfer/keygen.log"
     "$keygen" -y "$transfer/identity" >"$transfer/recipient"
-    bash "$0" "$1" system-backup-source "$transfer/backup.age"
-    bash "$0" "$1" system-backup-destination "$transfer/backup.age"
+    read -r port password < <(python3 - <<'PY'
+import secrets
+import socket
+
+with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1], secrets.token_hex(16))
+PY
+    )
+    mkdir "$transfer/storage"
+    "$rclone" serve webdav "$transfer/storage" --addr "127.0.0.1:$port" --user watchdog --pass "$password" \
+        >"$transfer/storage.log" 2>&1 &
+    storage=$!
+    printf '[offsite]\ntype = webdav\nurl = http://10.0.2.2:%s\nvendor = other\nuser = watchdog\npass = %s\n' \
+        "$port" "$("$rclone" obscure "$password")" >"$transfer/rclone.conf"
+    bash "$0" "$1" system-backup-source "$transfer/donor-proof"
+    bash "$0" "$1" system-backup-destination "$transfer/donor-proof"
     echo WATCHDOG_ENCRYPTED_SYSTEM_RESTORE_VM_PASS
     exit
 fi
@@ -60,7 +77,7 @@ cleanup() {
     fi
     if (( status != 0 )); then
         if [[ -s $work/guest.log ]]; then
-            grep -aE 'WATCHDOG_EICAR_|Rollback failed:' "$work/guest.log" >&2 || true
+            grep -aE 'WATCHDOG_EICAR_|WATCHDOG_BACKUP_JOB_ERROR|Rollback failed:' "$work/guest.log" >&2 || true
         fi
         for log in guest.log qemu.log geckodriver.log; do
             if [[ -s $work/$log ]]; then
@@ -88,7 +105,8 @@ PY
 ssh-keygen -q -t ed25519 -N '' -C watchdog-smoke-vm -f "$work/vm-key"
 sources=(LICENSE deploy/install-user.sh deploy/install.sh deploy/install-clamav.sh deploy/config.json
          deploy/ai-watchdog.service deploy/ai-watchdog-response.service watchdog)
-tar -C "$repo" --exclude=__pycache__ -czf "$work/source.tgz" "${sources[@]}"
+jobs=(deploy/ai-watchdog-backup-{upload,drill}.{service,timer})
+tar -C "$repo" --exclude=__pycache__ -czf "$work/source.tgz" "${sources[@]}" "${jobs[@]}"
 if [[ $mode == *-upgrade ]]; then
     # Last release before alert-review metadata was added.
     git -C "$repo" -c tar.umask=0022 archive --format=tar.gz ae1fe37ad4a4b3f85e5a95c5f32d091e02be624c "${sources[@]}" >"$work/legacy.tgz"
@@ -97,10 +115,11 @@ if [[ $mode == backup-destination ]]; then
     cp -- "$3" "$work/imported.tgz"
 elif [[ $mode == system-backup-source ]]; then
     cp -- "$(dirname -- "$3")/recipient" "$work/recipient"
+    cp -- "$(dirname -- "$3")/rclone.conf" "$work/rclone.conf"
 elif [[ $mode == system-backup-destination ]]; then
-    cp -- "$3" "$work/imported.age"
     cp -- "$(dirname -- "$3")/identity" "$work/identity"
-    cp -- "$3.proof" "$work/donor-proof"
+    cp -- "$(dirname -- "$3")/rclone.conf" "$work/rclone.conf"
+    cp -- "$3" "$work/donor-proof"
 fi
 python3 - "$work" "$smoke/eicar_guest.py" "$dashboard_port" "$mode" <<'PY'
 import base64
@@ -121,9 +140,10 @@ if mode == "backup-destination":
     files.append((work / "imported.tgz", "/var/tmp/watchdog-imported.tgz", "0600"))
 if mode == "system-backup-source":
     files.append((work / "recipient", "/var/tmp/watchdog-age-recipient", "0600"))
+if mode.startswith("system-backup-"):
+    files.append((work / "rclone.conf", "/var/tmp/watchdog-test-rclone.conf", "0600"))
 if mode == "system-backup-destination":
-    files.extend(((work / "imported.age", "/var/tmp/watchdog-imported.age", "0600"),
-                  (work / "identity", "/var/tmp/watchdog-age-identity", "0600"),
+    files.extend(((work / "identity", "/var/tmp/watchdog-age-identity", "0600"),
                   (work / "donor-proof", "/var/tmp/watchdog-donor-proof", "0600")))
 for source, target, permissions in files:
     payload = base64.b64encode(source.read_bytes()).decode()
@@ -160,16 +180,11 @@ done
 grep -a 'WATCHDOG_EICAR_' "$work/guest.log"
 if [[ $mode == *backup-source ]]; then
     fetch=(cat /var/tmp/watchdog-backup-export.tgz)
-    [[ $mode != system-backup-source ]] || fetch=(sudo -n cat /var/tmp/watchdog-backup-export.age)
+    [[ $mode != system-backup-source ]] || fetch=(sudo -n cat /var/tmp/watchdog-donor-proof)
     ssh -T -i "$work/vm-key" -o BatchMode=yes -o IdentitiesOnly=yes \
         -o "UserKnownHostsFile=$work/known_hosts" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 \
         -p "$ssh_port" ubuntu@127.0.0.1 "${fetch[@]}" >"$3"
     test -s "$3"
-    if [[ $mode == system-backup-source ]]; then
-        ssh -T -i "$work/vm-key" -o BatchMode=yes -o IdentitiesOnly=yes \
-            -o "UserKnownHostsFile=$work/known_hosts" -o StrictHostKeyChecking=yes -o ConnectTimeout=6 \
-            -p "$ssh_port" ubuntu@127.0.0.1 sudo -n cat /var/tmp/watchdog-donor-proof >"$3.proof"
-    fi
     exit
 elif [[ $mode == *backup-destination ]]; then
     exit

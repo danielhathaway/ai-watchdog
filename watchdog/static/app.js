@@ -670,14 +670,24 @@ function renderSettings() {
     ["Pending alerts", number.format(email.pending)],
     ["Last accepted by SMTP", email.last_sent_at ? fullDate(email.last_sent_at) : "None yet"],
   ] : [["Delivery", "Off"]];
-  if (email.coverage_notify_minutes) values.push(["Unresolved coverage", `Email after ${email.coverage_notify_minutes} min`]);
   if (email.retry_at) values.push(["Next retry", fullDate(email.retry_at)]);
-  get("email-status").replaceChildren(...values.map(([name, value]) => {
+  const rows = (entries) => entries.map(([name, value]) => {
     const row = element("div");
     row.append(element("dt", name), element("dd", value));
     return row;
-  }));
+  });
+  get("email-status").replaceChildren(...rows(values));
   get("email-help").hidden = email.enabled;
+  const coverage = email.coverage;
+  const delivery = email.enabled && email.coverage_notify_minutes ? [
+    ["Delivery", coverage.retry_at ? "Retrying" : coverage.pending ? "Queued" : "Enabled"],
+    ["Unresolved coverage", `Email after ${email.coverage_notify_minutes} min`],
+    ["Pending alerts", number.format(coverage.pending)],
+    ["Last accepted by SMTP", coverage.last_accepted_at ? fullDate(coverage.last_accepted_at) : "None yet"],
+  ] : [["Delivery", "Off"]];
+  if (coverage?.retry_at) delivery.push(["Next retry", fullDate(coverage.retry_at)]);
+  if (coverage?.last_expired_at) delivery.push(["Last expired before delivery", fullDate(coverage.last_expired_at)]);
+  get("coverage-email-status").replaceChildren(...rows(delivery));
 }
 
 function feedback(message, failed = false) {

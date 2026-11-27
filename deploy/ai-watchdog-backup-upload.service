@@ -1,0 +1,14 @@
+[Unit]
+Description=Publish an encrypted Watchdog backup and apply retention
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/ai-watchdog/backup-upload.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ai-watchdog
+ExecStart=/usr/bin/python3 -B -m watchdog backups publish --job /etc/ai-watchdog/backup-upload.json
+TimeoutStartSec=45min
+PrivateTmp=yes
+NoNewPrivileges=yes
+UMask=0077

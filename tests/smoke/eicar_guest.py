@@ -11,7 +11,6 @@ import sqlite3
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -20,10 +19,23 @@ CURRENT = "/var/tmp/watchdog-source.tgz"
 LEGACY = "/var/tmp/watchdog-legacy.tgz"
 REPO = Path("/home/ubuntu/watchdog-smoke")
 EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+OFFSITE = "offsite:backups/system"
+RCLONE_CONFIG = "/var/tmp/watchdog-test-rclone.conf"
 
 
 def run(*args):
     subprocess.run(args, check=True)
+
+
+def run_backup_job(name):
+    service = f"ai-watchdog-backup-{name}.service"
+    try:
+        run("systemctl", "start", service)
+    except subprocess.CalledProcessError:
+        journal = subprocess.check_output(["journalctl", "-u", service, "-n", "15", "--no-pager"], text=True)
+        for line in journal.splitlines():
+            print(f"WATCHDOG_BACKUP_JOB_ERROR {line}", flush=True)
+        raise
 
 
 class Guest:
@@ -253,34 +265,60 @@ class Guest:
             command += ("--desktop",)
         return subprocess.check_output((*command, *arguments), cwd=REPO if self.desktop else "/opt/ai-watchdog", text=True)
 
-    def install_private_clamd(self):
-        with tempfile.TemporaryDirectory() as directory:
-            subprocess.run(["apt-get", "download", "clamav-daemon"], check=True, cwd=directory)
-            package, = Path(directory).glob("*.deb")
-            run("dpkg-deb", "-x", str(package), directory)
-            run("install", "-m", "0755", f"{directory}/usr/sbin/clamd", "/usr/sbin/clamd")
+    def install_stock_clamd(self):
+        run("apt-get", "install", "-y", "clamav-daemon")
+        run("systemctl", "stop", "clamav-daemon.socket", "clamav-daemon.service")
+        profile = "/etc/apparmor.d/usr.sbin.clamd"
+        assert not any(profile in line for line in subprocess.run(
+            ["dpkg", "--verify", "clamav-daemon"], stdout=subprocess.PIPE, text=True).stdout.splitlines())
+        assert "/usr/sbin/clamd (enforce)" in Path("/sys/kernel/security/apparmor/profiles").read_text()
+
+    def check_stock_clamd(self):
+        pid = subprocess.check_output(["pgrep", "-u", "ai-watchdog", "-x", "clamd"], text=True).strip()
+        assert Path(f"/proc/{pid}/attr/current").read_text().strip() == "/usr/sbin/clamd (enforce)"
+        print("WATCHDOG_EICAR_APPARMOR EICAR detected in /srv under the enforced stock Ubuntu ClamD profile", flush=True)
+
+    def scheduled_uploads(self):
+        conf = Path("/etc/ai-watchdog")
+        job = conf / "backup-upload.json"
+        run("install", "-m", "0600", RCLONE_CONFIG, str(conf / "backup-upload-rclone.conf"))
+        job.touch(mode=0o600)
+        job.write_text(json.dumps({"remote": OFFSITE, "rclone_config": "backup-upload-rclone.conf", "keep": 2,
+                                   "recipient": Path("/var/tmp/watchdog-age-recipient").read_text().strip()}))
+        rclone = ("rclone", "--config", RCLONE_CONFIG)
+        unrelated = Path("/var/tmp/watchdog-retention-fixture")
+        unrelated.write_text("This unrelated object must survive retention.\n")
+        run(*rclone, "copyto", str(unrelated), OFFSITE + "/keep.txt")
+        run("systemctl", "enable", "ai-watchdog-backup-upload.timer")
+        for expected in (1, 2, 2):
+            run_backup_job("upload")
+            names = subprocess.check_output((*rclone, "lsf", "--files-only", OFFSITE), text=True).splitlines()
+            archives = sorted(name for name in names if name.endswith(".age"))
+            assert len(archives) == expected and "keep.txt" in names, names
+        assert "enabled" == subprocess.check_output(
+            ["systemctl", "is-enabled", "ai-watchdog-backup-upload.timer"], text=True).strip()
+        proof = {
+            "machine_id": Path("/etc/machine-id").read_text().strip(),
+            "token": hashlib.sha256((self.state / "token").read_bytes()).hexdigest(),
+            "config": hashlib.sha256(self.config.read_bytes()).hexdigest(),
+            "archive": archives[-1],
+        }
+        Path("/var/tmp/watchdog-donor-proof").write_text(json.dumps(proof))
+        print("WATCHDOG_EICAR_BACKUP verified scheduled encrypted uploads, readback, and retention", flush=True)
 
     def export_backup(self, event):
         self.request(f"/api/alerts/{event['id']}/acknowledge", "POST")
         clean = self.scan("pass", readiness="ready")
+        if not self.desktop:
+            coverage, = clean["system_checks"]["antivirus"]["checks"][0]["coverage"]
+            assert coverage["backend"] == "clamscan" and coverage["fallback"], coverage
+            self.scheduled_uploads()
+            return
         output = self.backups("create")
         backup = Path(output.strip().removeprefix("Backup created: "))
         assert backup.is_dir(), output
         assert json.loads(self.backups("list"))[0]["path"] == str(backup)
         assert "verification passed" in self.backups("verify", str(backup))
-        if not self.desktop:
-            coverage, = clean["system_checks"]["antivirus"]["checks"][0]["coverage"]
-            assert coverage["backend"] == "clamscan" and coverage["fallback"], coverage
-            recipient = Path("/var/tmp/watchdog-age-recipient").read_text().strip()
-            self.backups("export", str(backup), "/var/tmp/watchdog-backup-export.age", "--recipient", recipient)
-            proof = {
-                "machine_id": Path("/etc/machine-id").read_text().strip(),
-                "token": hashlib.sha256((backup / "state/token").read_bytes()).hexdigest(),
-                "config": hashlib.sha256((backup / "state/config.json").read_bytes()).hexdigest(),
-            }
-            Path("/var/tmp/watchdog-donor-proof").write_text(json.dumps(proof))
-            print("WATCHDOG_EICAR_BACKUP encrypted system donor backup after verifying ClamD and fallback")
-            return
         (backup / "donor-machine-id").write_bytes(Path("/etc/machine-id").read_bytes())
         archive = Path("/var/tmp/watchdog-backup-export.tgz")
         archive.touch(mode=0o600, exist_ok=False)
@@ -297,7 +335,22 @@ class Guest:
         if not self.desktop:
             proof = json.loads(Path("/var/tmp/watchdog-donor-proof").read_text())
             assert proof["machine_id"] != Path("/etc/machine-id").read_text().strip()
+            original_config = self.config.read_bytes()
+            conf = Path("/etc/ai-watchdog")
+            job = conf / "backup-drill.json"
+            job.touch(mode=0o600)
+            job.write_text(json.dumps({"remote": OFFSITE, "rclone_config": "rclone.conf", "identity": "identity"}))
+            run("install", "-m", "0600", RCLONE_CONFIG, str(conf / "backup-drill-rclone.conf"))
+            run("install", "-m", "0600", "/var/tmp/watchdog-age-identity", str(conf / "backup-drill-identity"))
+            run("systemctl", "enable", "ai-watchdog-backup-drill.timer")
+            run_backup_job("drill")
+            journal = subprocess.check_output(
+                ["journalctl", "-u", "ai-watchdog-backup-drill.service", "--no-pager"], text=True)
+            assert f"authenticated dashboard health check: {proof['archive']}" in journal, journal
+            assert self.config.read_bytes() == original_config and (self.state / "token").read_bytes() == original_token
+            print("WATCHDOG_EICAR_DRILL weekly service verified off-host restore without touching live state", flush=True)
             encrypted = "/var/tmp/watchdog-imported.age"
+            run("rclone", "--config", RCLONE_CONFIG, "copyto", f"{OFFSITE}/{proof['archive']}", encrypted)
             identity = ("--identity", "/var/tmp/watchdog-age-identity")
             assert "verification passed" in self.backups("verify", encrypted, *identity)
             output = self.backups("restore", encrypted, *identity)
@@ -338,10 +391,13 @@ class Guest:
 
     def exercise(self):
         upgrading = self.mode.endswith("-upgrade")
+        if self.mode == "system-upgrade":
+            # The stale-signature check advances the guest clock. Keep apt's real-time timers idle.
+            run("systemctl", "mask", "--now", "apt-daily.timer", "apt-daily-upgrade.timer")
         self.install(LEGACY if upgrading else CURRENT)
         encrypted = self.mode.startswith("system-backup-")
         if encrypted:
-            run("apt-get", "install", "-y", "age")
+            run("apt-get", "install", "-y", "age", "rclone")
         assert subprocess.check_output(["systemctl", "is-enabled", "clamav-freshclam.service"], text=True).strip() == "enabled"
         run("systemctl", "is-active", "--quiet", "clamav-freshclam.service")
         print(f"WATCHDOG_EICAR_INSTALL mode={self.mode} FreshClam is enabled and active")
@@ -350,7 +406,7 @@ class Guest:
             return
         wait_for_signatures()
         if self.mode == "system-backup-source":
-            self.install_private_clamd()
+            self.install_stock_clamd()
         self.scope.mkdir(mode=0o755, parents=True)
         (self.scope / "benign.txt").write_text("Benign file for the clean antivirus rescan.\n")
         sample = self.scope / ("legacy-eicar.com.txt" if upgrading else "eicar.com.txt")
@@ -362,6 +418,7 @@ class Guest:
             if self.mode == "system-backup-source":
                 coverage, = report["checks"][0]["coverage"]
                 assert coverage["backend"] == "clamd", coverage
+                self.check_stock_clamd()
             if upgrading:
                 older_event = event
                 self.verify_upgrade(report, event)

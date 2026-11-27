@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from test_console_integration import TOKEN, running_console
+from watchdog import notifications, store
 
 
 @unittest.skipUnless(os.environ.get("WATCHDOG_BROWSER_SMOKE") == "1", "Set WATCHDOG_BROWSER_SMOKE=1")
@@ -23,6 +24,15 @@ class BrowserSmoke(unittest.TestCase):
             state = Path(directory)
             try:
                 with running_console(state / "monitor.sqlite3") as console, socket.socket() as listener:
+                    now = time.time()
+                    settings = notifications.configuration({"host": "smtp.example.com", "sender": "from@example.com",
+                                                           "recipient": "to@example.com", "coverage_notify_minutes": 60}, state)
+                    with store.connect(console.monitor.database) as db:
+                        notifications.prepare(db, settings)
+                        queued = db.execute("INSERT INTO email_outbox(at,severity,title) VALUES (?,'medium','Coverage')", (now,))
+                        db.execute("INSERT INTO coverage_email VALUES (?, ?)", ("/synthetic", queued.lastrowid))
+                        store.property_set(db, "email_delivery", {"failures": 1, "next_at": now + 60})
+                        store.property_set(db, "coverage_email_delivery", {"last_accepted_at": now - 60})
                     listener.bind(("127.0.0.1", 0))
                     port = listener.getsockname()[1]
                     listener.close()
@@ -118,6 +128,9 @@ class BrowserSmoke(unittest.TestCase):
         wait_for("document.querySelector('#health-check-time').textContent.includes('Every 5 min') && "
                  "document.querySelector('#hardening-check-time').textContent.includes('Every 60 min')")
         click("[data-page='settings']")
+        wait_for("document.querySelector('#coverage-email-status').innerText.includes('Retrying') && "
+                 "document.querySelector('#coverage-email-status').innerText.includes('Next retry') && "
+                 "!document.querySelector('#coverage-email-status').innerText.includes('None yet')")
         fill("#schedule-minutes", "60")
         click("#schedule-form button")
         wait_for("document.querySelector('#next-check').innerText !== 'Off' && "

@@ -94,6 +94,10 @@ def main():
     export.add_argument("source", type=Path)
     export.add_argument("destination", type=Path)
     export.add_argument("--recipient", required=True, help="Public native age X25519 recipient")
+    for name, help_text in (("publish", "Upload and rotate encrypted backups"),
+                            ("drill", "Run an isolated restore of the newest off-host backup")):
+        job = backup_actions.add_parser(name, help=help_text)
+        job.add_argument("--job", required=True, type=Path, help="Private backup job configuration")
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -167,7 +171,7 @@ def main():
     if args.command in {"rollback", "backups"}:
         from contextlib import nullcontext
 
-        from . import backup_crypto, backups
+        from . import backup_crypto, backup_job, backups
         from .rollback import Deployment, RollbackError
 
         if args.config != CONFIG:
@@ -181,6 +185,14 @@ def main():
                 print(f"Backup created: {installation.create_backup()}")
             elif args.operation == "list":
                 print(json.dumps(backups.inventory(installation.backups), indent=2))
+            elif args.operation in {"publish", "drill"}:
+                options = backup_job.settings(args.job.absolute(), args.operation)
+                if args.operation == "publish":
+                    name = backup_job.publish(installation, options)
+                    print(f"Encrypted backup uploaded, verified and rotated: {name}")
+                else:
+                    name = backup_job.drill(options, args.desktop)
+                    print(f"Isolated restore drill passed the authenticated dashboard health check: {name}")
             elif args.operation == "export":
                 backup_crypto.export_backup(args.source.resolve(strict=True), args.destination.absolute(), args.recipient)
                 print(f"Encrypted backup exported: {args.destination}")

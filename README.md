@@ -216,6 +216,8 @@ New high and critical events enter a local queue. Set `minimum_severity` to `cri
 
 Set `"coverage_notify_minutes": 60` inside `email_alerts` to opt into one email per path incident that stays unresolved for 60 minutes after Watchdog records degradation. This policy applies independently of `minimum_severity`. Use 0 to disable it. Recovery cancels queued mail for that incident. The email omits scan paths, so use Activity to identify the affected path.
 
+In **Settings → Coverage email delivery**, Watchdog shows the coverage queue, any retry time, the last coverage message accepted by the SMTP relay, and the last coverage message that expired before delivery. Ordinary alert mail does not update these coverage timestamps.
+
 ### Enable and verify containment
 
 First verify the sensors and independent supervisor in observe mode. From a local console on a disposable test host, stop the monitor, verify **would-isolate** through `journalctl -u ai-watchdog-response`, and restart the monitor. A missing heartbeat may be acted on immediately once the supervisor has previously verified a healthy monitor. A stale heartbeat or unresponsive console triggers a response after the configured deadlines.
@@ -296,6 +298,47 @@ python3 -B -m watchdog backups --desktop restore watchdog.age --identity /privat
 
 Omit `--desktop` and run as root for a system-wide backup. Verification and restore use private local temporary storage to decrypt the archive, check its layout, and verify its manifest and SQLite database. Restore requires the identity and the encrypted archive. Neither command reinstalls the application from the archive.
 
+### Schedule off-host backups and restore drills
+
+The system installer installs two opt-in systemd timers. Install `age` and `rclone` on the uploader and verifier, configure authenticated remote storage, and reserve one remote subdirectory per Watchdog installation. The uploader needs list, read, write, and delete access to that subdirectory. Give the verifier list and read access and keep the private age identity on the verifier and in your recovery storage. Use mode `0600` for the job files, credentials, and identity. [rclone configuration](https://rclone.org/docs/)
+
+On the Watchdog host, create `/etc/ai-watchdog/backup-upload.json` and point it to the uploader's rclone config. Set `keep` to the number of encrypted archives to retain, between 2 and 365.
+
+```json
+{
+  "remote": "offsite:watchdog-backups/endpoint01",
+  "rclone_config": "backup-upload-rclone.conf",
+  "recipient": "age1...",
+  "keep": 30
+}
+```
+
+```sh
+sudo systemctl start ai-watchdog-backup-upload.service
+sudo systemctl enable --now ai-watchdog-backup-upload.timer
+journalctl -u ai-watchdog-backup-upload.service
+```
+
+The daily job briefly stops Watchdog while it captures consistent state. It encrypts the backup locally, uploads only ciphertext, and reads the uploaded archive back to verify its SHA-256 digest before deleting older managed archives. It preserves unrelated files. Use a single uploader per subdirectory.
+
+On a separate verifier with the system Watchdog package installed, create `/etc/ai-watchdog/backup-drill.json` with the same remote and the credential names below. Place the verifier's rclone config at `/etc/ai-watchdog/backup-drill-rclone.conf` and its private age identity at `/etc/ai-watchdog/backup-drill-identity`. The service uses private temporary copies, so choose a remote credential that works without persisting a refreshed config file.
+
+```json
+{
+  "remote": "offsite:watchdog-backups/endpoint01",
+  "rclone_config": "rclone.conf",
+  "identity": "identity"
+}
+```
+
+```sh
+sudo systemctl start ai-watchdog-backup-drill.service
+sudo systemctl enable --now ai-watchdog-backup-drill.timer
+journalctl -u ai-watchdog-backup-drill.service
+```
+
+The weekly drill downloads the newest archive, checks the digest, verifies the decrypted manifest and SQLite database, and starts an isolated authenticated dashboard using scratch state, with enforcement and email disabled. Check the timer and service journal for the result. If the system must be recovered, download the desired encrypted archive and run `backups verify` and `backups restore` with the private identity on the destination.
+
 ### Coverage limits
 
 This is a host-side detection and containment layer. It covers the host network namespace and the listed signals. Full-system hangs, a compromised kernel, and a sufficiently privileged attacker can defeat host-local enforcement. A separate switch, gateway, or management controller is required for containment when the host itself cannot execute. Payload inspection, malware scanning, and operating-system patch management are outside the implemented coverage.
@@ -346,7 +389,7 @@ GitHub Actions runs the EICAR smoke test on pull requests and pushes to `main` t
 
 The backup-restore scenario creates a real backup on one VM and verifies it on a separately installed VM with a different machine ID. It checks that configuration, dashboard access, acknowledged EICAR evidence, and timed antivirus history survive the restore.
 
-The system-backup-restore scenario requires `age-keygen` on the host. It verifies EICAR detection through ClamD, deliberately forces ClamScan fallback, transfers an encrypted backup to a separate system-wide installation, and checks that the restored dashboard and scan history match the donor. The temporary private identity is supplied only to the destination VM.
+The system-backup-restore scenario requires `age-keygen` and `rclone` on the host. It verifies EICAR detection through ClamD under Ubuntu's unchanged AppArmor profile, exercises ClamScan fallback, publishes and rotates encrypted archives on a separate storage fixture, runs the scheduled drill on a fresh VM, and restores the newest archive into a system-wide installation. The temporary private identity is supplied only to the destination VM.
 
 ### Benchmark multi-path antivirus scans
 

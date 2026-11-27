@@ -105,6 +105,7 @@ def prepare(db, settings):
     if store.property_get(db, "email_destination") != destination:
         db.execute("DELETE FROM email_outbox")
         store.property_set(db, "email_delivery", {})
+        store.property_set(db, "coverage_email_delivery", {})
         store.property_set(db, "email_destination", destination)
 
 
@@ -112,6 +113,8 @@ def status(db):
     destination = store.property_get(db, "email_destination")
     delivery = store.property_get(db, "email_delivery", {})
     count = db.execute("SELECT count(*) FROM email_outbox").fetchone()[0]
+    coverage = store.property_get(db, "coverage_email_delivery", {})
+    coverage_pending = db.execute("SELECT count(*) FROM coverage_email").fetchone()[0]
     return {
         "enabled": destination is not None,
         "minimum_severity": destination["minimum_severity"] if destination else None,
@@ -119,6 +122,12 @@ def status(db):
         "pending": count,
         "last_sent_at": delivery.get("last_sent_at"),
         "retry_at": delivery.get("next_at") if delivery.get("failures") and count else None,
+        "coverage": {
+            "pending": coverage_pending,
+            "retry_at": delivery.get("next_at") if delivery.get("failures") and coverage_pending else None,
+            "last_accepted_at": coverage.get("last_accepted_at"),
+            "last_expired_at": coverage.get("last_expired_at"),
+        },
     }
 
 
@@ -162,11 +171,22 @@ def queue_coverage(database, settings, paths, now):
 
 def deliver(database, settings, now):
     with store.connect(database) as db:
+        db.execute("BEGIN IMMEDIATE")
+        expired = db.execute(
+            "SELECT 1 FROM coverage_email JOIN email_outbox ON outbox_id=id WHERE at < ? LIMIT 1",
+            (now - MESSAGE_TTL,),
+        ).fetchone()
         db.execute("DELETE FROM email_outbox WHERE at < ?", (now - MESSAGE_TTL,))
+        if expired:
+            coverage = store.property_get(db, "coverage_email_delivery", {})
+            store.property_set(db, "coverage_email_delivery", {**coverage, "last_expired_at": now})
         delivery = store.property_get(db, "email_delivery", {})
         if now < delivery.get("next_at", 0):
             return
-        events = db.execute("SELECT * FROM email_outbox ORDER BY id LIMIT ?", (MESSAGE_LIMIT,)).fetchall()
+        events = db.execute(
+            "SELECT email_outbox.*, coverage_email.outbox_id IS NOT NULL AS coverage FROM email_outbox "
+            "LEFT JOIN coverage_email ON outbox_id=id ORDER BY id LIMIT ?", (MESSAGE_LIMIT,),
+        ).fetchall()
     if not events:
         return
     try:
@@ -183,4 +203,7 @@ def deliver(database, settings, now):
         with store.connect(database) as db:
             db.execute("DELETE FROM email_outbox WHERE id <= ?", (events[-1]["id"],))
             store.property_set(db, "email_delivery", {"last_sent_at": now, "next_at": now + MIN_DELAY})
+            if any(event["coverage"] for event in events):
+                coverage = store.property_get(db, "coverage_email_delivery", {})
+                store.property_set(db, "coverage_email_delivery", {**coverage, "last_accepted_at": now})
             store.event(db, now, "info", "email", "Alert email accepted by SMTP", f"{len(events)} alerts")

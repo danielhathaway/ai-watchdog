@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly off-host Watchdog restore drill
+
+[Timer]
+OnCalendar=Sun *-*-* 06:00:00
+Persistent=yes
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target
