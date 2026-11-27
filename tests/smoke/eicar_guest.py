@@ -203,18 +203,27 @@ class Guest:
         with oversized.open("wb") as output:
             output.truncate(128 * 1024 * 1024)
         try:
-            incomplete = self.scan("warn", readiness="ready")["system_checks"]["antivirus"]
+            for _ in range(3):
+                snapshot = self.scan("warn", readiness="ready")
+            incomplete = snapshot["system_checks"]["antivirus"]
             path, = incomplete["checks"][0]["coverage"]
             assert path["path"] == str(self.scope) and path["access_errors"] > 0 and path["limit_hits"] == 1, path
             assert incomplete["next_at"] - incomplete["at"] == 300, incomplete
+            degraded, = [item for item in snapshot["events"] if item["kind"] == "antivirus-coverage"
+                         and item["subject"] == str(self.scope) and item["severity"] == "medium"]
+            assert degraded["title"] == "Antivirus path coverage degraded", degraded
         finally:
             restricted.chmod(0o755)
             oversized.unlink()
-        clean = self.scan("pass", readiness="ready")["system_checks"]["antivirus"]
+        snapshot = self.scan("pass", readiness="ready")
+        clean = snapshot["system_checks"]["antivirus"]
         assert clean["checks"][0]["files_scanned"] == 2, clean
+        recovered, = [item for item in snapshot["events"] if item["kind"] == "antivirus-coverage"
+                      and item["subject"] == str(self.scope) and item["severity"] == "info"]
+        assert recovered["title"] == "Antivirus path coverage recovered", recovered
         (restricted / "readable-after-repair.txt").unlink()
         restricted.rmdir()
-        print("WATCHDOG_EICAR_RECOVERY reported path access errors and a file limit, then scanned both readable files")
+        print("WATCHDOG_EICAR_RECOVERY reported sustained coverage degradation and recovery in Activity")
 
     def verify_stale_recovery(self):
         # Advance only the disposable guest clock so ClamAV sees its real signed database as stale.
@@ -235,21 +244,73 @@ class Guest:
         self.wait_scan(started, "pass", readiness="ready")
         print("WATCHDOG_EICAR_RECOVERY stale signatures blocked a scan and recovered with a current signature age")
 
+    def backups(self, *arguments):
+        return subprocess.check_output((*self.user, "/usr/bin/python3", "-B", "-m", "watchdog",
+                                        "backups", "--desktop", *arguments), cwd=REPO, text=True)
+
+    def export_backup(self, event):
+        self.request(f"/api/alerts/{event['id']}/acknowledge", "POST")
+        self.scan("pass", readiness="ready")
+        output = self.backups("create")
+        backup = Path(output.strip().removeprefix("Backup created: "))
+        assert backup.is_dir(), output
+        assert json.loads(self.backups("list"))[0]["path"] == str(backup)
+        assert "verification passed" in self.backups("verify", str(backup))
+        (backup / "donor-machine-id").write_bytes(Path("/etc/machine-id").read_bytes())
+        archive = Path("/var/tmp/watchdog-backup-export.tgz")
+        archive.touch(mode=0o600, exist_ok=False)
+        run("chown", "ubuntu:ubuntu", str(archive))
+        run(*self.user, "tar", "-czf", str(archive), "-C", str(backup), ".")
+        print("WATCHDOG_EICAR_BACKUP created, inventoried and verified donor backup")
+
+    def restore_backup(self):
+        self.scope.mkdir(mode=0o755, parents=True)
+        (self.scope / "benign.txt").write_text("Benign file on the restored host.\n")
+        self.configure([])
+        self.wait(lambda status: status["ready"], "a newly installed destination")
+        original_token = (self.state / "token").read_bytes()
+        backup = self.state / "rollbacks/backup-import"
+        backup.parent.mkdir(mode=0o700, exist_ok=True)
+        backup.mkdir(mode=0o700)
+        run("tar", "-xzf", "/var/tmp/watchdog-imported.tgz", "-C", str(backup))
+        run("chown", "-R", "ubuntu:ubuntu", str(backup.parent))
+        assert (backup / "donor-machine-id").read_bytes() != Path("/etc/machine-id").read_bytes()
+        assert "verification passed" in self.backups("verify", str(backup))
+        output = self.backups("restore", str(backup))
+        assert "dashboard health check passed" in output, output
+        assert self.config.read_bytes() == (backup / "state/config.json").read_bytes()
+        token = (self.state / "token").read_bytes()
+        assert token != original_token and token == (backup / "state/token").read_bytes()
+        self.port = json.loads(self.config.read_text())["port"]
+        self.origin = f"http://127.0.0.1:{self.port}"
+        status = self.wait(lambda report: report["ready"], "the restored dashboard")
+        event, = [item for item in status["events"] if item["title"] == "ClamAV detected malware"]
+        assert event["review"]["acknowledged_at"] and "Eicar-Test-Signature FOUND" in event["detail"], event
+        history = self.request("/api/antivirus/history")["results"]
+        assert {item["status"] for item in history} >= {"pass", "fail"}, history
+        assert all(item["duration_seconds"] is not None for item in history), history
+        assert "manifest-present" in self.backups("list")
+        print("WATCHDOG_EICAR_RESTORE distinct fresh VM restored configuration, token, alert review and coverage history")
+
     def exercise(self):
-        self.install(CURRENT if self.mode == "desktop" else LEGACY)
+        upgrading = self.mode.endswith("-upgrade")
+        self.install(LEGACY if upgrading else CURRENT)
         assert subprocess.check_output(["systemctl", "is-enabled", "clamav-freshclam.service"], text=True).strip() == "enabled"
         run("systemctl", "is-active", "--quiet", "clamav-freshclam.service")
         print(f"WATCHDOG_EICAR_INSTALL mode={self.mode} FreshClam is enabled and active")
+        if self.mode == "backup-destination":
+            self.restore_backup()
+            return
         wait_for_signatures()
         self.scope.mkdir(mode=0o755, parents=True)
         (self.scope / "benign.txt").write_text("Benign file for the clean antivirus rescan.\n")
-        sample = self.scope / ("eicar.com.txt" if self.mode == "desktop" else "legacy-eicar.com.txt")
+        sample = self.scope / ("legacy-eicar.com.txt" if upgrading else "eicar.com.txt")
         sample.write_bytes(EICAR)
         try:
             started = time.time()
             self.configure([self.scope])
             report, event = self.detection(self.wait_scan(started, "fail"), sample)
-            if self.mode != "desktop":
+            if upgrading:
                 older_event = event
                 self.verify_upgrade(report, event)
         finally:
@@ -259,7 +320,7 @@ class Guest:
             self.verify_coverage_recovery()
             self.verify_stale_recovery()
 
-        if self.mode != "desktop":
+        if upgrading:
             sample = self.scope / "eicar.com.txt"
             sample.write_bytes(EICAR)
             try:
@@ -268,6 +329,8 @@ class Guest:
                 self.verify_rollback(report, event, older_event)
             finally:
                 sample.unlink()
+        if self.mode == "backup-source":
+            self.export_backup(event)
         print(f"WATCHDOG_EICAR_ACTIVITY event={event['id']} severity={event['severity']} detail={event['detail']}")
 
 

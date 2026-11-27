@@ -10,6 +10,7 @@ on:
       - 'deploy/install-user.sh'
       - 'deploy/install-clamav.sh'
       - 'watchdog/__main__.py'
+      - 'watchdog/backups.py'
       - 'watchdog/common.py'
       - 'watchdog/monitor.py'
       - 'watchdog/reviews.py'
@@ -38,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [desktop, desktop-upgrade, system-upgrade]
+        mode: [desktop, desktop-upgrade, system-upgrade, backup-restore]
     defaults:
       run:
         shell: bash

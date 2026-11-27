@@ -112,6 +112,23 @@ class SystemChecksTests(unittest.TestCase):
         self.assertEqual(checks.ANTIVIRUS_TIMEOUT, report["coverage"][0]["duration_seconds"])
         self.assertIsNone(report["coverage"][1]["duration_seconds"])
 
+    def test_coverage_alerts_fire_once_and_recover_only_after_verified_coverage(self):
+        path = "/downloads"
+        fail = {"path": path, "status": "warn", "limit_hits": 1, "files_scanned": 1}
+        ready = {"path": path, "status": "pass", "files_scanned": 2}
+        unavailable = {"path": path, "status": "warn", "files_scanned": 0}
+        empty = {"path": path, "status": "skipped", "files_scanned": 0}
+        for at, row in enumerate([fail, fail, ready, fail, unavailable, fail, fail, fail, empty, ready, ready], 1):
+            with store.connect(self.database) as db:
+                checks.update_coverage_alerts(db, at, [row])
+        with store.connect(self.database) as db:
+            alerts = [tuple(row) for row in db.execute("SELECT at,severity,title,subject FROM events ORDER BY id")]
+            self.assertEqual([
+                (7, "medium", "Antivirus path coverage degraded", path),
+                (10, "info", "Antivirus path coverage recovered", path),
+            ], alerts)
+            self.assertEqual({}, store.property_get(db, "antivirus_coverage_incidents"))
+
     def test_manual_antivirus_scan_shares_the_worker_and_preserves_the_alert(self):
         config = self.directory / "config.json"
         with store.connect(self.database) as db:

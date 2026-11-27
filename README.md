@@ -155,6 +155,8 @@ Scans run locally under the monitor account with a shared 15-minute limit. **Cov
 
 Open **Sensors → Antivirus coverage history** to see previous path results under the configured retention period. Filter by path or load older results. Retained results remain available after paths are removed from the configuration. History starts with scans run after this feature is installed.
 
+Activity records a medium-severity coverage alert after three successive scans report a path access error, scan error, or file or archive limit. Further failures for that path leave the incident open without repeating the alert. An information event records recovery when ClamAV scans files on that path without reporting an error or limit. Empty paths and scanner-wide failures provide no evidence of recovery.
+
 ### Optional Wi-Fi-only GNOME discovery
 
 On Ubuntu systems with the `wsdd` package, an enforced `/usr/bin/wsdd` AppArmor profile, and GNOME’s `wsdd` backend, find your Wi-Fi interface with `ip -brief link`. From a trusted checkout run the following, replacing `wlp5s0` with that interface.
@@ -265,6 +267,21 @@ The command stops the installed services, backs up the running application, conf
 
 The backup path is printed before the change. Desktop backups are under `.watchdog/rollbacks` and system backups under `/var/lib/ai-watchdog-rollbacks`. Backups are private and contain the dashboard token. Keep them protected according to your local backup policy. After restarting the target, the command checks the authenticated dashboard and any previously running supervisor. If startup fails, it attempts to restore the original application and database and reports the backup path.
 
+### Create, verify, and restore backups
+
+Run from the installed desktop checkout as the monitor user. For the system installation, run from `/opt/ai-watchdog` as root and omit `--desktop`.
+
+```sh
+python3 -B -m watchdog backups --desktop create
+python3 -B -m watchdog backups --desktop list
+python3 -B -m watchdog backups --desktop verify /path/to/backup-directory
+python3 -B -m watchdog backups --desktop restore /path/to/backup-directory
+```
+
+Create briefly stops Watchdog so it can back up a consistent SQLite database. List inventories backups in the local backup directory. Verify checks the SHA-256 manifest and SQLite integrity. Use backups from a trusted source. Backups made before manifests were introduced are listed as unverified.
+
+To restore onto a fresh host, first install and start Watchdog in the same installation mode. Copy the backup directory over a trusted channel and keep it private and owned by the account running restore. Restore verifies the backup before stopping the services, backs up the destination, and restores the configuration, database, token, and recorded baseline files. It uses the destination's installed application and leaves its local containment latch in place. If the restored dashboard fails its authenticated health check, the command attempts to recover the destination's prior state. Review scan paths, the integrity baseline, and any separately stored SMTP credential on the destination.
+
 ### Coverage limits
 
 This is a host-side detection and containment layer. It covers the host network namespace and the listed signals. Full-system hangs, a compromised kernel, and a sufficiently privileged attacker can defeat host-local enforcement. A separate switch, gateway, or management controller is required for containment when the host itself cannot execute. Payload inspection, malware scanning, and operating-system patch management are outside the implemented coverage.
@@ -303,6 +320,7 @@ Run the antivirus smoke test on an x86-64 Linux host with QEMU, OVMF, xorriso, O
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img desktop-upgrade
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img system-upgrade
+bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img backup-restore
 ```
 
 Each run creates a disposable disk overlay and verifies that FreshClam is enabled and downloads signatures. The Firefox test acknowledges an EICAR alert in **Open findings**, runs a clean scan after the sample is removed, checks retained coverage and timing for both results, and resolves the original finding. The upgrade modes install the pre-review commit `ae1fe37`, upgrade, use the operator rollback command and verify its state backup and dashboard health check, then reinstall the latest version to confirm the review and coverage history survived. The system-wide mode also checks per-path coverage under home-directory restrictions, reports scan limits and unreadable files, and exercises stale signature recovery using the disposable guest clock.
@@ -310,6 +328,26 @@ Each run creates a disposable disk overlay and verifies that FreshClam is enable
 The runner uses a loopback-only SSH tunnel for dashboard access and discards the guest and its test data afterward. A successful run prints `WATCHDOG_EICAR_VM_PASS`. The Firefox executable overrides above also apply to this test. Set `WATCHDOG_OVMF_CODE` and `WATCHDOG_OVMF_VARS` if OVMF is installed outside `/usr/share/OVMF`.
 
 GitHub Actions runs the EICAR smoke test on pull requests and pushes to `main` that touch the installers, antivirus integration, or smoke test. The workflow also supports manual runs from the Actions tab.
+
+The backup-restore scenario creates a real backup on one VM and verifies it on a separately installed VM with a different machine ID. It checks that configuration, dashboard access, acknowledged EICAR evidence, and timed antivirus history survive the restore.
+
+### Benchmark multi-path antivirus scans
+
+With matching ClamAV and ClamD binaries and the packaged signature database at `/var/lib/clamav`, run the comparison from the checkout. The benchmark starts a temporary daemon under the current account on a private Unix socket.
+
+```sh
+PYTHONPATH="$PWD" python3 -B tests/smoke/benchmark_clamav.py --clamd /path/to/clamd
+```
+
+One ClamAV 1.5.4 run used three trials with 24 benign 16 KiB files per path. The batch times below are medians, with each batch taken from the corresponding prefix of a four-path trial. Ubuntu VM tests were active on the same host, so these numbers describe the small-file startup cost on that host.
+
+| Paths | Watchdog with `clamscan` | Warm private `clamd` |
+| --- | ---: | ---: |
+| 1 | 19.737 s | 0.328 s |
+| 2 | 38.069 s | 0.454 s |
+| 4 | 82.064 s | 0.610 s |
+
+ClamD took 12.813 s to start and used 100.6 MiB of resident memory after the trials. These results support an opt-in daemon for frequent multi-path scans. Keep the existing backend until a daemon integration can reproduce per-path permission and limit reporting, verify signature freshness, and recover safely if the socket is unavailable. [ClamD protocol documentation](https://docs.clamav.net/manual/Usage/ClamdProtocol.html)
 
 For additional source and deployment validation:
 

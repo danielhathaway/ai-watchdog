@@ -79,6 +79,14 @@ def main():
     rollback = actions.add_parser("rollback", help="Back up Watchdog state and install a trusted older checkout")
     rollback.add_argument("source", type=Path, help="Separate local checkout of the trusted rollback version")
     rollback.add_argument("--desktop", action="store_true", help="Roll back the desktop user installation")
+    backup = actions.add_parser("backups", help="Create, list, verify, or restore Watchdog backups")
+    backup.add_argument("--desktop", action="store_true", help="Use the desktop user installation")
+    backup_actions = backup.add_subparsers(dest="operation", required=True)
+    backup_actions.add_parser("create", help="Take a private backup of the installed application and state")
+    backup_actions.add_parser("list", help="List backups under the installation's backup directory")
+    for name in ("verify", "restore"):
+        action = backup_actions.add_parser(name, help=f"{name.title()} a backup directory")
+        action.add_argument("source", type=Path)
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -149,16 +157,29 @@ def main():
         except (OSError, KeyError, ValueError, TypeError, sqlite3.Error, subprocess.SubprocessError) as error:
             parser.exit(1, f"Vulnerability check failed: {error}\n")
         return
-    if args.command == "rollback":
+    if args.command in {"rollback", "backups"}:
+        from . import backups
         from .rollback import Deployment, RollbackError
 
         if args.config != CONFIG:
-            parser.error("Rollback uses the installed Watchdog configuration")
+            parser.error("Backup and rollback commands use the installed Watchdog configuration")
+        installation = Deployment(args.desktop)
         try:
-            Deployment(args.desktop).rollback(args.source)
+            if args.command == "rollback":
+                installation.rollback(args.source)
+                print("Rollback completed. The dashboard health check passed.")
+            elif args.operation == "create":
+                print(f"Backup created: {installation.create_backup()}")
+            elif args.operation == "list":
+                print(json.dumps(backups.inventory(installation.backups), indent=2))
+            elif args.operation == "verify":
+                backups.verify(args.source.resolve(strict=True))
+                print("Backup verification passed.")
+            else:
+                installation.restore(args.source)
+                print("Restore completed. The dashboard health check passed.")
         except (RollbackError, OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
-            parser.exit(1, f"Rollback failed: {error}\n")
-        print("Rollback completed. The dashboard health check passed.")
+            parser.exit(1, f"{args.command} failed: {error}\n")
         return
     if args.command == "baseline" and args.directory is not None:
         from .system_checks import record_baseline

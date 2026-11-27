@@ -535,6 +535,28 @@ def read(db, settings):
     return reports
 
 
+def update_coverage_alerts(db, now, coverage):
+    previous = store.property_get(db, "antivirus_coverage_incidents", {})
+    current = {}
+    for row in coverage:
+        path = row["path"]
+        count = previous.get(path, 0)
+        if row.get("access_errors") or row.get("limit_hits") or row.get("scan_errors"):
+            if count == 2:
+                store.event(db, now, "medium", "antivirus-coverage", "Antivirus path coverage degraded",
+                            "ClamAV reported access, scan, or file limits on three successive attempts.", path)
+            current[path] = min(count + 1, 3)
+        elif row["status"] in {"pass", "fail"} and (row.get("files_scanned") or 0) > 0:
+            if count == 3:
+                store.event(db, now, "info", "antivirus-coverage", "Antivirus path coverage recovered",
+                            "ClamAV scanned files in this path without reporting access errors or limits.", path)
+        elif count:
+            # Unavailable scans and empty paths provide no evidence that coverage recovered.
+            current[path] = count
+    if current != previous:
+        store.property_set(db, "antivirus_coverage_incidents", current)
+
+
 def save(database, group, now, rows, *, paths=None):
     with store.connect(database) as db:
         db.execute("BEGIN IMMEDIATE")
@@ -542,7 +564,10 @@ def save(database, group, now, rows, *, paths=None):
         before = {row["id"]: row for row in saved.get(group, {}).get("checks", [])}
         for row in rows:
             if group == "antivirus":
-                store.record_antivirus_paths(db, now, row.get("coverage", []))
+                coverage = row.get("coverage", [])
+                store.record_antivirus_paths(db, now, coverage)
+                if coverage:
+                    update_coverage_alerts(db, now, coverage)
             previous = before.get(row["id"], {})
             detection = group == "antivirus" and row["status"] == "fail"
             scope_changed = detection and paths != saved.get(group, {}).get("paths")

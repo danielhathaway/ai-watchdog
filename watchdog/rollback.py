@@ -10,10 +10,11 @@ import stat
 import subprocess
 import tempfile
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from urllib.error import URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from . import backups
 from .common import CONFIG, RESPONSE_STATE, configuration
 
 SYSTEM_ROOT = Path("/opt/ai-watchdog")
@@ -141,7 +142,7 @@ class Deployment:
             time.sleep(1)
         raise RollbackError("Watchdog did not pass the authenticated dashboard health check")
 
-    def preflight(self, source):
+    def preflight(self, source=None):
         if self.desktop == (os.geteuid() == 0):
             raise RollbackError("Run desktop rollback as the monitor user and system rollback as root")
         if self.desktop:
@@ -150,11 +151,12 @@ class Deployment:
                 raise RollbackError("The desktop monitor state directory must be private and owned by this account")
         else:
             trusted_directory(self.root)
-            trusted_directory(source)
+            if source is not None:
+                trusted_directory(source)
             trusted_directory(self.config.parent)
             if (RESPONSE_STATE / "isolation.json").exists():
                 raise RollbackError("The isolation latch is present; review containment before stopping the supervisor")
-        if self.root == source or source.is_relative_to(self.root / "watchdog"):
+        if source is not None and (self.root == source or source.is_relative_to(self.root / "watchdog")):
             raise RollbackError("Use a separate checkout of the trusted rollback version")
         for unit in (self.monitor, self.supervisor):
             directory = self.systemctl("show", "--value", "--property=WorkingDirectory", unit).stdout.strip()
@@ -186,13 +188,118 @@ class Deployment:
     def rollback(self, source):
         source = source.resolve(strict=True)
         port = self.preflight(source)
+        with self.maintenance_lock():
+            return self.replace(source, port)
+
+    @contextmanager
+    def maintenance_lock(self):
         fd = os.open(self.backups / "lock", os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:
-                raise RollbackError("Another rollback is already running") from error
-            return self.replace(source, port)
+                raise RollbackError("Another backup, restore, or rollback is already running") from error
+            yield
+
+    def capture(self, backup):
+        metadata = self.backup_state(backup)
+        token = (backup / "state/token").read_text().strip()
+        if len(token) < 40:
+            raise RollbackError("The backed-up dashboard token is missing or invalid")
+        backups.seal(backup, self.desktop)
+        return metadata, token
+
+    def create_backup(self):
+        port = self.preflight()
+        with self.maintenance_lock():
+            was_active, supervise = self.active(self.monitor), self.active(self.supervisor)
+            backup = Path(tempfile.mkdtemp(dir=self.backups, prefix="backup-"))
+            copy_package(self.root / "watchdog", backup / "watchdog", root_owned=not self.desktop)
+            token = None
+            try:
+                self.stop()
+                _, token = self.capture(backup)
+            finally:
+                self.restart_original(port, token, was_active, supervise)
+            return backup
+
+    def restart_original(self, port, token, was_active, supervise):
+        if was_active and token:
+            self.start_healthy(port, token, supervise)
+        else:
+            if was_active:
+                self.systemctl("start", self.monitor)
+            if supervise:
+                self.systemctl("start", self.supervisor)
+
+    def apply_state(self, state, metadata):
+        restore_database(state / "monitor.sqlite3", self.state / "monitor.sqlite3", metadata)
+        for name in sorted(backups.STATE_NAMES - {"monitor.sqlite3"}):
+            destination = self.config if name == "config.json" else self.state / name
+            if not self.desktop and name in {"baseline.json", "watchdog-integrity.json"}:
+                destination = self.config.parent / name
+            source = state / name
+            if not source.is_file():
+                destination.unlink(missing_ok=True)
+                continue
+            owner = (0, 0) if not self.desktop and destination.parent == self.config.parent else (
+                metadata.st_uid, metadata.st_gid,
+            )
+            mode = 0o644 if owner[0] == 0 and name in {"baseline.json", "watchdog-integrity.json"} else 0o600
+            if destination == self.config:
+                mode = stat.S_IMODE(self.config.lstat().st_mode)
+            with tempfile.TemporaryDirectory(dir=destination.parent) as directory:
+                replacement = Path(directory) / name
+                copy_regular(source, replacement)
+                os.chown(replacement, *owner)
+                replacement.chmod(mode)
+                os.replace(replacement, destination)
+
+    def restore(self, source):
+        source = source.resolve(strict=True)
+        manifest = backups.verify(source)
+        if manifest["mode"] != ("desktop" if self.desktop else "system"):
+            raise RollbackError("Backup and destination installation modes differ")
+        original_port = self.preflight()
+        with self.maintenance_lock(), tempfile.TemporaryDirectory(dir=self.backups) as directory:
+            stage = Path(directory)
+            (stage / "state").mkdir(mode=0o700)
+            files = {f"state/{name}": manifest["files"][f"state/{name}"] for name in backups.STATE_NAMES
+                     if f"state/{name}" in manifest["files"]}
+            for name in files:
+                copy_regular(source / name, stage / name)
+            backups.verify_files(stage, files)
+            state = stage / "state"
+            port = configuration(state / "config.json")["port"]
+            token = (state / "token").read_text().strip()
+            if len(token) < 40:
+                raise RollbackError("The dashboard token in the backup is invalid")
+            was_active, supervise = self.active(self.monitor), self.active(self.supervisor)
+            fallback = Path(tempfile.mkdtemp(dir=self.backups, prefix="backup-"))
+            copy_package(self.root / "watchdog", fallback / "watchdog", root_owned=not self.desktop)
+            print(f"Pre-restore backup: {fallback}", flush=True)
+            original_token = None
+            changed = False
+            try:
+                self.stop()
+                if not self.desktop and (RESPONSE_STATE / "isolation.json").exists():
+                    raise RollbackError("The isolation latch appeared while stopping Watchdog")
+                metadata, original_token = self.capture(fallback)
+                changed = True
+                self.apply_state(state, metadata)
+                self.start_healthy(port, token, supervise)
+            except (Exception, KeyboardInterrupt) as error:
+                try:
+                    if changed:
+                        self.stop()
+                        self.apply_state(fallback / "state", metadata)
+                    self.restart_original(original_port, original_token, was_active, supervise)
+                except (Exception, KeyboardInterrupt) as recovery:
+                    raise RollbackError(f"Restore failed ({error}); automatic recovery failed ({recovery}). "
+                                        f"Use the backup at {fallback}.") from recovery
+                raise RollbackError(f"Restore failed ({error}); the original installation was restored. "
+                                    f"Backup: {fallback}") from error
+            return fallback
 
     def replace(self, source, port):
         app = self.root / "watchdog"
@@ -212,10 +319,7 @@ class Deployment:
                 self.stop()
                 if not self.desktop and (RESPONSE_STATE / "isolation.json").exists():
                     raise RollbackError("The isolation latch appeared while stopping Watchdog")
-                metadata = self.backup_state(backup)
-                token = (backup / "state" / "token").read_text().strip()
-                if len(token) < 40:
-                    raise RollbackError("The backed-up dashboard token is missing or invalid")
+                metadata, token = self.capture(backup)
                 os.replace(app, previous)
                 os.replace(candidate, app)
                 started = True
@@ -229,14 +333,7 @@ class Deployment:
                         os.replace(previous, app)
                     if started:
                         restore_database(backup / "state" / "monitor.sqlite3", database, metadata)
-                    if was_active and token:
-                        self.start_healthy(port, token, supervise)
-                    elif was_active:
-                        self.systemctl("start", self.monitor)
-                        if supervise:
-                            self.systemctl("start", self.supervisor)
-                    elif supervise:
-                        self.systemctl("start", self.supervisor)
+                    self.restart_original(port, token, was_active, supervise)
                 except (Exception, KeyboardInterrupt) as recovery:
                     raise RollbackError(f"Rollback failed ({error}); automatic recovery failed ({recovery}). "
                                         f"Use the backup at {backup}.") from recovery

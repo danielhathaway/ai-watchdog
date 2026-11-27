@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 # Boot a fresh overlay from an Ubuntu 24.04 amd64 cloud image.
 set -euo pipefail
-if [[ $# -lt 1 || $# -gt 2 || ! -r $1 ]]; then
-    echo "Usage: bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img [desktop|desktop-upgrade|system-upgrade]" >&2
+if [[ $# -lt 1 || $# -gt 3 || ! -r $1 ]]; then
+    echo "Usage: bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img [desktop|desktop-upgrade|system-upgrade|backup-restore]" >&2
     exit 2
 fi
 mode=${2:-desktop}
-case "$mode" in desktop|desktop-upgrade|system-upgrade) ;; *) echo "Unknown mode: $mode" >&2; exit 2 ;; esac
+if [[ $mode == backup-restore ]]; then
+    umask 077
+    transfer=$(mktemp -d)
+    trap 'rm -rf -- "$transfer"' EXIT
+    bash "$0" "$1" backup-source "$transfer/backup.tgz"
+    bash "$0" "$1" backup-destination "$transfer/backup.tgz"
+    echo WATCHDOG_FRESH_RESTORE_VM_PASS
+    exit
+fi
+case "$mode" in
+    desktop|desktop-upgrade|system-upgrade) ;;
+    backup-source|backup-destination) : "${3:?Missing private backup transfer path}" ;;
+    *) echo "Unknown mode: $mode" >&2; exit 2 ;;
+esac
 image=$(realpath -- "$1")
 repo=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 smoke=$repo/tests/smoke
@@ -15,7 +28,9 @@ variables=${WATCHDOG_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 for command in python3 qemu-img qemu-system-x86_64 ssh ssh-keygen timeout xorriso; do
     command -v "$command" >/dev/null || { echo "Missing $command" >&2; exit 1; }
 done
-command -v "${WATCHDOG_GECKODRIVER:-geckodriver}" >/dev/null || { echo "Missing GeckoDriver." >&2; exit 1; }
+if [[ $mode != backup-* ]]; then
+    command -v "${WATCHDOG_GECKODRIVER:-geckodriver}" >/dev/null || { echo "Missing GeckoDriver." >&2; exit 1; }
+fi
 for file in "$firmware" "$variables"; do
     [[ -r $file ]] || { echo "Cannot read OVMF firmware file: $file" >&2; exit 1; }
 done
@@ -61,9 +76,12 @@ ssh-keygen -q -t ed25519 -N '' -C watchdog-smoke-vm -f "$work/vm-key"
 sources=(LICENSE deploy/install-user.sh deploy/install.sh deploy/install-clamav.sh deploy/config.json
          deploy/ai-watchdog.service deploy/ai-watchdog-response.service watchdog)
 tar -C "$repo" --exclude=__pycache__ -czf "$work/source.tgz" "${sources[@]}"
-if [[ $mode != desktop ]]; then
+if [[ $mode == *-upgrade ]]; then
     # Last release before alert-review metadata was added.
     git -C "$repo" -c tar.umask=0022 archive --format=tar.gz ae1fe37ad4a4b3f85e5a95c5f32d091e02be624c "${sources[@]}" >"$work/legacy.tgz"
+fi
+if [[ $mode == backup-destination ]]; then
+    cp -- "$3" "$work/imported.tgz"
 fi
 python3 - "$work" "$smoke/eicar_guest.py" "$dashboard_port" "$mode" <<'PY'
 import base64
@@ -78,8 +96,10 @@ files = [
     (work / "source.tgz", "/var/tmp/watchdog-source.tgz", "0644"),
     (guest_script, "/usr/local/sbin/watchdog-eicar-check", "0755"),
 ]
-if mode != "desktop":
+if mode.endswith("-upgrade"):
     files.append((work / "legacy.tgz", "/var/tmp/watchdog-legacy.tgz", "0644"))
+if mode == "backup-destination":
+    files.append((work / "imported.tgz", "/var/tmp/watchdog-imported.tgz", "0600"))
 for source, target, permissions in files:
     payload = base64.b64encode(source.read_bytes()).decode()
     config.extend((f"  - path: {target}", f"    permissions: '{permissions}'", "    encoding: b64", f"    content: {payload}"))
@@ -113,5 +133,14 @@ until grep -aq WATCHDOG_EICAR_GUEST_PASS "$work/guest.log" 2>/dev/null; do
     sleep 2
 done
 grep -a 'WATCHDOG_EICAR_' "$work/guest.log"
+if [[ $mode == backup-source ]]; then
+    ssh -T -i "$work/vm-key" -o BatchMode=yes -o IdentitiesOnly=yes \
+        -o "UserKnownHostsFile=$work/known_hosts" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 \
+        -p "$ssh_port" ubuntu@127.0.0.1 cat /var/tmp/watchdog-backup-export.tgz >"$3"
+    test -s "$3"
+    exit
+elif [[ $mode == backup-destination ]]; then
+    exit
+fi
 PYTHONPATH="$repo/tests:$repo" python3 -B "$smoke/eicar_browser.py" "$work" "$ssh_port" "$dashboard_port" "$mode"
 echo WATCHDOG_EICAR_VM_PASS

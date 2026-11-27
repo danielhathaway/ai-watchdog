@@ -7,7 +7,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from watchdog import rollback, store
+from watchdog import backups, rollback, store
 
 
 class RollbackTests(unittest.TestCase):
@@ -93,3 +93,79 @@ class RollbackTests(unittest.TestCase):
         with self.assertRaises(OSError):
             rollback.copy_regular(link, output)
         self.assertFalse(output.exists())
+
+    def test_inventory_and_verification_detect_tampering(self):
+        managed = self.directory / "inventory"
+        current = managed / "backup-current"
+        (current / "state").mkdir(mode=0o700, parents=True)
+        managed.chmod(0o700)
+        current.chmod(0o700)
+        legacy = managed / "backup-legacy"
+        legacy.mkdir(mode=0o700)
+        state = current / "state"
+        (state / "config.json").write_text("{}")
+        (state / "token").write_text("a" * 43)
+        store.initialize(state / "monitor.sqlite3")
+        backups.seal(current, desktop=True)
+        self.assertEqual("desktop", backups.verify(current)["mode"])
+        self.assertEqual({str(current): "manifest-present", str(legacy): "unverified"},
+                         {entry["path"]: entry["status"] for entry in backups.inventory(managed)})
+        (state / "config.json").write_text('{"port":9001}')
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            backups.verify(current)
+        (state / "monitor.sqlite3").write_bytes(b"not a database")
+        backups.seal(current, desktop=True)
+        with self.assertRaises(sqlite3.DatabaseError):
+            backups.verify(current)
+
+    def test_verified_restore_recovers_destination_if_startup_fails(self):
+        deployment = rollback.Deployment(desktop=True)
+        deployment.root = self.directory / "checkout"
+        deployment.state = deployment.root / ".watchdog"
+        deployment.config = deployment.state / "config.json"
+        deployment.backups = deployment.state / "rollbacks"
+        deployment.backups.mkdir(parents=True)
+        package = deployment.root / "watchdog"
+        (package / "static").mkdir(parents=True)
+        for name in ("__init__.py", "__main__.py", "common.py", "monitor.py", "server.py"):
+            (package / name).write_text(name)
+        for name in rollback.ASSETS:
+            (package / "static" / name).write_text(name)
+        source = self.directory / "backup-donor"
+        source.mkdir(mode=0o700)
+        (source / "state").mkdir(mode=0o700)
+        for state, marker, token, config in (
+            (deployment.state, "destination", "a" * 43, "{}"),
+            (source / "state", "donor", "b" * 43, '{"port": 9001}'),
+        ):
+            (state / "token").write_text(token)
+            (state / "config.json").write_text(config)
+            store.initialize(state / "monitor.sqlite3")
+            with store.connect(state / "monitor.sqlite3") as db:
+                store.property_set(db, "marker", marker)
+        backups.seal(source, desktop=True)
+        (source / "state/token").write_text("c" * 43)
+        with patch.object(deployment, "stop") as stop:
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                deployment.restore(source)
+            stop.assert_not_called()
+        (source / "state/token").write_text("b" * 43)
+
+        started = []
+        def healthy(port, token, supervise):
+            with store.connect(deployment.state / "monitor.sqlite3") as db:
+                marker = store.property_get(db, "marker")
+            started.append((port, token, marker))
+            if marker == "donor":
+                raise rollback.RollbackError("failed restored health check")
+
+        with patch.object(deployment, "preflight", return_value=8765), patch.object(deployment, "active", return_value=True), \
+             patch.object(deployment, "stop") as stop, patch.object(deployment, "start_healthy", side_effect=healthy), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(rollback.RollbackError, "original installation was restored"):
+                deployment.restore(source)
+        self.assertEqual(2, stop.call_count)
+        self.assertEqual([(9001, "b" * 43, "donor"), (8765, "a" * 43, "destination")], started)
+        self.assertEqual("{}", deployment.config.read_text())
+        fallback, = deployment.backups.glob("backup-*")
+        self.assertEqual("desktop", backups.verify(fallback)["mode"])
