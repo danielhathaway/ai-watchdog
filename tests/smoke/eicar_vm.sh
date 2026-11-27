@@ -19,24 +19,31 @@ if [[ $mode == system-backup-restore ]]; then
     umask 077
     transfer=$(mktemp -d)
     storage=
-    trap 'if [[ -n $storage ]]; then kill "$storage" 2>/dev/null || true; wait "$storage" 2>/dev/null || true; fi; rm -rf -- "$transfer"' EXIT
+    policy=
+    trap 'for process in "$policy" "$storage"; do if [[ -n $process ]]; then kill "$process" 2>/dev/null || true; wait "$process" 2>/dev/null || true; fi; done; rm -rf -- "$transfer"' EXIT
     keygen=${WATCHDOG_AGE_KEYGEN:-age-keygen}
     rclone=${WATCHDOG_RCLONE:-rclone}
-    "$keygen" -o "$transfer/identity" 2>"$transfer/keygen.log"
-    "$keygen" -y "$transfer/identity" >"$transfer/recipient"
-    read -r port password < <(python3 - <<'PY'
+    for key in retired current; do
+        "$keygen" -o "$transfer/$key.identity" 2>"$transfer/keygen.log"
+        "$keygen" -y "$transfer/$key.identity" >"$transfer/$key.recipient"
+    done
+    read -r port backend_port password < <(python3 - <<'PY'
 import secrets
 import socket
 
-with socket.socket() as listener:
+with socket.socket() as listener, socket.socket() as backend:
     listener.bind(("127.0.0.1", 0))
-    print(listener.getsockname()[1], secrets.token_hex(16))
+    backend.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1], backend.getsockname()[1], secrets.token_hex(16))
 PY
     )
     mkdir "$transfer/storage"
-    "$rclone" serve webdav "$transfer/storage" --addr "127.0.0.1:$port" --user watchdog --pass "$password" \
+    "$rclone" serve webdav "$transfer/storage" --addr "127.0.0.1:$backend_port" --user watchdog --pass "$password" \
         >"$transfer/storage.log" 2>&1 &
     storage=$!
+    python3 -B "$(dirname -- "$0")/immutable_webdav.py" "$port" "$backend_port" "$transfer/storage" \
+        >"$transfer/policy.log" 2>&1 &
+    policy=$!
     printf '[offsite]\ntype = webdav\nurl = http://10.0.2.2:%s\nvendor = other\nuser = watchdog\npass = %s\n' \
         "$port" "$("$rclone" obscure "$password")" >"$transfer/rclone.conf"
     bash "$0" "$1" system-backup-source "$transfer/donor-proof"
@@ -114,10 +121,10 @@ fi
 if [[ $mode == backup-destination ]]; then
     cp -- "$3" "$work/imported.tgz"
 elif [[ $mode == system-backup-source ]]; then
-    cp -- "$(dirname -- "$3")/recipient" "$work/recipient"
+    cp -- "$(dirname -- "$3")/"{retired,current}.recipient "$work/"
     cp -- "$(dirname -- "$3")/rclone.conf" "$work/rclone.conf"
 elif [[ $mode == system-backup-destination ]]; then
-    cp -- "$(dirname -- "$3")/identity" "$work/identity"
+    cp -- "$(dirname -- "$3")/"{retired,current}.identity "$work/"
     cp -- "$(dirname -- "$3")/rclone.conf" "$work/rclone.conf"
     cp -- "$3" "$work/donor-proof"
 fi
@@ -139,12 +146,14 @@ if mode.endswith("-upgrade"):
 if mode == "backup-destination":
     files.append((work / "imported.tgz", "/var/tmp/watchdog-imported.tgz", "0600"))
 if mode == "system-backup-source":
-    files.append((work / "recipient", "/var/tmp/watchdog-age-recipient", "0600"))
+    for key in ("retired", "current"):
+        files.append((work / f"{key}.recipient", f"/var/tmp/watchdog-age-{key}.recipient", "0600"))
 if mode.startswith("system-backup-"):
     files.append((work / "rclone.conf", "/var/tmp/watchdog-test-rclone.conf", "0600"))
 if mode == "system-backup-destination":
-    files.extend(((work / "identity", "/var/tmp/watchdog-age-identity", "0600"),
-                  (work / "donor-proof", "/var/tmp/watchdog-donor-proof", "0600")))
+    for key in ("retired", "current"):
+        files.append((work / f"{key}.identity", f"/var/tmp/watchdog-age-{key}.identity", "0600"))
+    files.append((work / "donor-proof", "/var/tmp/watchdog-donor-proof", "0600"))
 for source, target, permissions in files:
     payload = base64.b64encode(source.read_bytes()).decode()
     config.extend((f"  - path: {target}", f"    permissions: '{permissions}'", "    encoding: b64", f"    content: {payload}"))

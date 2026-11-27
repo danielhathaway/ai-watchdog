@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import re
@@ -20,6 +21,7 @@ LEGACY = "/var/tmp/watchdog-legacy.tgz"
 REPO = Path("/home/ubuntu/watchdog-smoke")
 EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 OFFSITE = "offsite:backups/system"
+IMMUTABLE = "offsite:backups/immutable"
 RCLONE_CONFIG = "/var/tmp/watchdog-test-rclone.conf"
 
 
@@ -278,13 +280,25 @@ class Guest:
         assert Path(f"/proc/{pid}/attr/current").read_text().strip() == "/usr/sbin/clamd (enforce)"
         print("WATCHDOG_EICAR_APPARMOR EICAR detected in /srv under the enforced stock Ubuntu ClamD profile", flush=True)
 
+    def check_backup_health(self, job, status, title):
+        report = self.wait(lambda snapshot: snapshot.get("backup_health", {}).get(job, {}).get("status") == status
+                           and any(event["title"] == title for event in snapshot["events"]), title)
+        matching = [event for event in report["events"] if event["title"] == title and event["kind"] == "backup"]
+        assert len(matching) == 1, matching
+
     def scheduled_uploads(self):
         conf = Path("/etc/ai-watchdog")
         job = conf / "backup-upload.json"
         run("install", "-m", "0600", RCLONE_CONFIG, str(conf / "backup-upload-rclone.conf"))
         job.touch(mode=0o600)
-        job.write_text(json.dumps({"remote": OFFSITE, "rclone_config": "backup-upload-rclone.conf", "keep": 2,
-                                   "recipient": Path("/var/tmp/watchdog-age-recipient").read_text().strip()}))
+        retired = Path("/var/tmp/watchdog-age-retired.recipient").read_text().strip()
+        current = Path("/var/tmp/watchdog-age-current.recipient").read_text().strip()
+        options = {"remote": OFFSITE, "rclone_config": "backup-upload-rclone.conf", "keep": 2, "recipient": retired}
+        job.write_text(json.dumps(options))
+        # Model a configured job that has had no successful uploads for longer than its deadline.
+        overdue = time.time() - 27 * 3600
+        os.utime(job, (overdue, overdue))
+        self.check_backup_health("upload", "overdue", "Scheduled backup upload missed")
         rclone = ("rclone", "--config", RCLONE_CONFIG)
         unrelated = Path("/var/tmp/watchdog-retention-fixture")
         unrelated.write_text("This unrelated object must survive retention.\n")
@@ -297,14 +311,32 @@ class Guest:
             assert len(archives) == expected and "keep.txt" in names, names
         assert "enabled" == subprocess.check_output(
             ["systemctl", "is-enabled", "ai-watchdog-backup-upload.timer"], text=True).strip()
+        self.check_backup_health("upload", "healthy", "Scheduled backup uploads recovered")
         proof = {
             "machine_id": Path("/etc/machine-id").read_text().strip(),
             "token": hashlib.sha256((self.state / "token").read_bytes()).hexdigest(),
-            "config": hashlib.sha256(self.config.read_bytes()).hexdigest(),
-            "archive": archives[-1],
+            "retired_config": hashlib.sha256(self.config.read_bytes()).hexdigest(),
         }
+        options.update(remote=IMMUTABLE, keep=0)
+        job.write_text(json.dumps(options))
+        run_backup_job("upload")
+        names = subprocess.check_output((*rclone, "lsf", "--files-only", IMMUTABLE), text=True).splitlines()
+        proof["retired_archive"], = names
+        options["recipient"] = current
+        job.write_text(json.dumps(options))
+        config = json.loads(self.config.read_text())
+        self.config.write_text(json.dumps({**config, "interval": 11}))
+        for _ in range(2):
+            run_backup_job("upload")
+        archives = sorted(subprocess.check_output((*rclone, "lsf", "--files-only", IMMUTABLE), text=True).splitlines())
+        assert len(archives) == 3 and archives[0] == proof["retired_archive"], archives
+        immutable_object = f"{IMMUTABLE}/{proof['retired_archive']}"
+        for command in (("deletefile", immutable_object), ("copyto", str(unrelated), immutable_object, "--ignore-times")):
+            attempt = subprocess.run((*rclone, "--retries", "1", *command), capture_output=True, text=True)
+            assert attempt.returncode and "403" in attempt.stderr, attempt.stderr
+        proof.update(archive=archives[-1], config=hashlib.sha256(self.config.read_bytes()).hexdigest())
         Path("/var/tmp/watchdog-donor-proof").write_text(json.dumps(proof))
-        print("WATCHDOG_EICAR_BACKUP verified scheduled encrypted uploads, readback, and retention", flush=True)
+        print("WATCHDOG_EICAR_BACKUP verified missed upload and recovery, key rotation and server-side immutability", flush=True)
 
     def export_backup(self, event):
         self.request(f"/api/alerts/{event['id']}/acknowledge", "POST")
@@ -339,19 +371,31 @@ class Guest:
             conf = Path("/etc/ai-watchdog")
             job = conf / "backup-drill.json"
             job.touch(mode=0o600)
-            job.write_text(json.dumps({"remote": OFFSITE, "rclone_config": "rclone.conf", "identity": "identity"}))
+            job.write_text(json.dumps({"remote": IMMUTABLE, "rclone_config": "rclone.conf", "identity": "identity"}))
             run("install", "-m", "0600", RCLONE_CONFIG, str(conf / "backup-drill-rclone.conf"))
-            run("install", "-m", "0600", "/var/tmp/watchdog-age-identity", str(conf / "backup-drill-identity"))
+            retired = "/var/tmp/watchdog-age-retired.identity"
+            current = "/var/tmp/watchdog-age-current.identity"
+            run("install", "-m", "0600", retired, str(conf / "backup-drill-identity"))
             run("systemctl", "enable", "ai-watchdog-backup-drill.timer")
+            failed = subprocess.run(["systemctl", "start", "ai-watchdog-backup-drill.service"], capture_output=True)
+            assert failed.returncode, "The retired key unexpectedly opened the new archive"
+            self.check_backup_health("drill", "failed", "Scheduled restore drill failed")
+            run("install", "-m", "0600", current, str(conf / "backup-drill-identity"))
             run_backup_job("drill")
             journal = subprocess.check_output(
                 ["journalctl", "-u", "ai-watchdog-backup-drill.service", "--no-pager"], text=True)
+            assert "Could not decrypt the backup with this age identity" in journal, journal
             assert f"authenticated dashboard health check: {proof['archive']}" in journal, journal
+            self.check_backup_health("drill", "healthy", "Scheduled restore drill recovered")
             assert self.config.read_bytes() == original_config and (self.state / "token").read_bytes() == original_token
-            print("WATCHDOG_EICAR_DRILL weekly service verified off-host restore without touching live state", flush=True)
+            print("WATCHDOG_EICAR_DRILL wrong key raised a dashboard alert, rotated key recovered the isolated drill", flush=True)
+            pinned = Path("/var/tmp/watchdog-pinned-drill.json")
+            pinned.touch(mode=0o600)
+            pinned.write_text(json.dumps({"remote": IMMUTABLE, "rclone_config": RCLONE_CONFIG, "identity": retired}))
+            assert proof["retired_archive"] in self.backups("drill", "--job", str(pinned), "--archive", proof["retired_archive"])
             encrypted = "/var/tmp/watchdog-imported.age"
-            run("rclone", "--config", RCLONE_CONFIG, "copyto", f"{OFFSITE}/{proof['archive']}", encrypted)
-            identity = ("--identity", "/var/tmp/watchdog-age-identity")
+            run("rclone", "--config", RCLONE_CONFIG, "copyto", f"{IMMUTABLE}/{proof['archive']}", encrypted)
+            identity = ("--identity", current)
             assert "verification passed" in self.backups("verify", encrypted, *identity)
             output = self.backups("restore", encrypted, *identity)
             assert "dashboard health check passed" in output, output
@@ -361,7 +405,13 @@ class Guest:
             self.check_restored_dashboard()
             history = self.request("/api/antivirus/history")["results"]
             assert {"clamd", "clamscan"} <= {row["backend"] for row in history}, history
-            print("WATCHDOG_EICAR_RESTORE encrypted state verified on a fresh system-wide VM")
+            previous_archive = "/var/tmp/watchdog-retired.age"
+            run("rclone", "--config", RCLONE_CONFIG, "copyto", f"{IMMUTABLE}/{proof['retired_archive']}", previous_archive)
+            assert "verification passed" in self.backups("verify", previous_archive, "--identity", retired)
+            assert "dashboard health check passed" in self.backups("restore", previous_archive, "--identity", retired)
+            assert hashlib.sha256(self.config.read_bytes()).hexdigest() == proof["retired_config"] != proof["config"]
+            self.check_restored_dashboard()
+            print("WATCHDOG_EICAR_RESTORE both key generations recovered from immutable storage on a fresh VM", flush=True)
             return
         backup = self.state / "rollbacks/backup-import"
         backup.parent.mkdir(mode=0o700, exist_ok=True)

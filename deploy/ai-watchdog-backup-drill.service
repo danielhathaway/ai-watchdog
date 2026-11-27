@@ -15,6 +15,7 @@ RuntimeDirectory=ai-watchdog-backup-drill
 RuntimeDirectoryMode=0700
 ExecStartPre=/usr/bin/install -m 0600 %d/job.json %d/rclone.conf %d/identity %t/ai-watchdog-backup-drill
 ExecStart=/usr/bin/python3 -B -m watchdog backups drill --job %t/ai-watchdog-backup-drill/job.json
+ExecStopPost=+/usr/bin/python3 -B -m watchdog backup-result drill
 TimeoutStartSec=30min
 PrivateTmp=yes
 ProtectSystem=strict

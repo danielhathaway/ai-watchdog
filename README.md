@@ -321,6 +321,8 @@ journalctl -u ai-watchdog-backup-upload.service
 
 The daily job briefly stops Watchdog while it captures consistent state. It encrypts the backup locally, uploads only ciphertext, and reads the uploaded archive back to verify its SHA-256 digest before deleting older managed archives. It preserves unrelated files. Use a single uploader per subdirectory.
 
+For immutable storage, set `keep` to `0` and configure retention with your storage provider. Watchdog still verifies its uploads and leaves expiration to the provider, so the uploader only needs list, read, and create access. Verify the provider's immutability policy before relying on it. [Amazon S3 Object Lock documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock.html)
+
 On a separate verifier with the system Watchdog package installed, create `/etc/ai-watchdog/backup-drill.json` with the same remote and the credential names below. Place the verifier's rclone config at `/etc/ai-watchdog/backup-drill-rclone.conf` and its private age identity at `/etc/ai-watchdog/backup-drill-identity`. The service uses private temporary copies, so choose a remote credential that works without persisting a refreshed config file.
 
 ```json
@@ -338,6 +340,10 @@ journalctl -u ai-watchdog-backup-drill.service
 ```
 
 The weekly drill downloads the newest archive, checks the digest, verifies the decrypted manifest and SQLite database, and starts an isolated authenticated dashboard using scratch state, with enforcement and email disabled. Check the timer and service journal for the result. If the system must be recovered, download the desired encrypted archive and run `backups verify` and `backups restore` with the private identity on the destination.
+
+**Sensors → Off-host backups** shows the upload deadline, the last successful run, and any recorded failures for jobs configured on that host. Activity records a missed upload when there has been no verified upload for 26 hours and records a failed restore drill after the systemd job exits unsuccessfully. It also records recovery. Set `backup_upload_max_hours` in the Watchdog monitor configuration if you change the upload schedule. Run the Watchdog monitor on the verifier to see its drill status in that host's dashboard.
+
+To rotate the age key, generate a new identity on the verifier, replace the uploader's public `recipient`, publish a new archive, and update the verifier's drill identity. Keep the retired identity in recovery storage for as long as any archive encrypted to it is retained. Older immutable archives stay encrypted to their original recipients. To rehearse an older recovery point, run `backups drill --job /path/to/private-job.json --archive ARCHIVE_NAME` with a job file pointing to the retired identity, or download the archive and verify it directly.
 
 ### Coverage limits
 
@@ -389,7 +395,7 @@ GitHub Actions runs the EICAR smoke test on pull requests and pushes to `main` t
 
 The backup-restore scenario creates a real backup on one VM and verifies it on a separately installed VM with a different machine ID. It checks that configuration, dashboard access, acknowledged EICAR evidence, and timed antivirus history survive the restore.
 
-The system-backup-restore scenario requires `age-keygen` and `rclone` on the host. It verifies EICAR detection through ClamD under Ubuntu's unchanged AppArmor profile, exercises ClamScan fallback, publishes and rotates encrypted archives on a separate storage fixture, runs the scheduled drill on a fresh VM, and restores the newest archive into a system-wide installation. The temporary private identity is supplied only to the destination VM.
+The system-backup-restore scenario requires `age-keygen` and `rclone` on the host. It verifies EICAR detection under Ubuntu's unchanged ClamD AppArmor profile and exercises ClamScan fallback. The storage fixture tests normal retention and enforces write-once rules on a separate archive directory. The test checks both dashboard alerts and their recoveries, confirms overwrites and deletes are refused, then restores pre-rotation and post-rotation archives on a fresh Ubuntu VM using their respective keys. The temporary private identities are supplied only to the destination VM.
 
 ### Benchmark multi-path antivirus scans
 

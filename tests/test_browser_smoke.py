@@ -33,6 +33,8 @@ class BrowserSmoke(unittest.TestCase):
                         db.execute("INSERT INTO coverage_email VALUES (?, ?)", ("/synthetic", queued.lastrowid))
                         store.property_set(db, "email_delivery", {"failures": 1, "next_at": now + 60})
                         store.property_set(db, "coverage_email_delivery", {"last_accepted_at": now - 60})
+                        store.property_set(db, "backup_health", {"upload": {"status": "overdue", "deadline": now - 60},
+                                                                 "drill": {"status": "failed", "failure_at": now - 30}})
                     listener.bind(("127.0.0.1", 0))
                     port = listener.getsockname()[1]
                     listener.close()
@@ -124,6 +126,9 @@ class BrowserSmoke(unittest.TestCase):
             click(f"[data-page='{page}']")
             wait_for(f"!document.querySelector('#{page}').hidden")
         click("[data-page='sensors']")
+        wait_for("!document.querySelector('#backup-health-panel').hidden && "
+                 "document.querySelector('#backup-health').innerText.includes('Overdue') && "
+                 "document.querySelector('#backup-health').innerText.includes('Last run failed')")
         wait_for("document.querySelector('#vulnerability-status').textContent.includes('No scan recorded')")
         wait_for("document.querySelector('#health-check-time').textContent.includes('Every 5 min') && "
                  "document.querySelector('#hardening-check-time').textContent.includes('Every 60 min')")

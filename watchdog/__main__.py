@@ -98,10 +98,22 @@ def main():
                             ("drill", "Run an isolated restore of the newest off-host backup")):
         job = backup_actions.add_parser(name, help=help_text)
         job.add_argument("--job", required=True, type=Path, help="Private backup job configuration")
+        if name == "drill":
+            job.add_argument("--archive", help="Drill a specific retained archive instead of the newest one")
+    receipt = actions.add_parser("backup-result", help="Record a systemd backup job result")
+    receipt.add_argument("job", choices=("upload", "drill"))
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     os.umask(0o077)
+    if args.command == "backup-result":
+        from . import backup_health
+
+        try:
+            backup_health.record(args.job, time.time(), os.environ)
+        except (OSError, ValueError) as error:
+            parser.exit(1, f"Could not record scheduled backup result: {error}\n")
+        return
     if args.command == "demo":
         if not 1024 <= args.port <= 65535:
             parser.error("Demo port must be between 1024 and 65535")
@@ -189,9 +201,9 @@ def main():
                 options = backup_job.settings(args.job.absolute(), args.operation)
                 if args.operation == "publish":
                     name = backup_job.publish(installation, options)
-                    print(f"Encrypted backup uploaded, verified and rotated: {name}")
+                    print(f"Encrypted backup uploaded and verified: {name}")
                 else:
-                    name = backup_job.drill(options, args.desktop)
+                    name = backup_job.drill(options, args.desktop, args.archive)
                     print(f"Isolated restore drill passed the authenticated dashboard health check: {name}")
             elif args.operation == "export":
                 backup_crypto.export_backup(args.source.resolve(strict=True), args.destination.absolute(), args.recipient)

@@ -510,6 +510,7 @@ function renderSystemChecks() {
   const antivirus = snapshot.system_checks?.antivirus;
   get("antivirus-panel").hidden = !antivirus;
   if (antivirus) renderAntivirus(antivirus);
+  renderBackupHealth();
   for (const group of ["health", "hardening"]) {
     const report = snapshot.system_checks?.[group];
     const target = get(`${group}-checks`);
@@ -558,6 +559,24 @@ function renderSystemChecks() {
     });
     target.replaceChildren(...rows);
   }
+}
+
+function renderBackupHealth() {
+  const names = {upload: "Encrypted backup uploads", drill: "Restore drills"};
+  const labels = {healthy: "Healthy", overdue: "Overdue", failed: "Last run failed", waiting: "Waiting for first run"};
+  const colors = {healthy: "good-text", overdue: "bad-text", failed: "bad-text", waiting: "warning-text"};
+  const rows = Object.entries(snapshot.backup_health ?? {}).map(([job, report]) => {
+    const row = element("div");
+    const detail = element("dd");
+    detail.append(element("strong", labels[report.status], colors[report.status]));
+    if (report.success_at) detail.append(element("span", `Last successful run ${fullDate(report.success_at)}`));
+    if (report.failure_at) detail.append(element("span", `Last failed run ${fullDate(report.failure_at)}`));
+    if (report.deadline) detail.append(element("span", `Upload deadline ${fullDate(report.deadline)}`));
+    row.append(element("dt", names[job]), detail);
+    return row;
+  });
+  get("backup-health-panel").hidden = !rows.length;
+  get("backup-health").replaceChildren(...rows);
 }
 
 function renderAntivirus(report) {

@@ -453,14 +453,16 @@ udp UNCONN 0 0 *:10001 *:* users:(("wsdd",pid=2,fd=8)) ino:51 sk:ba cgroup:/user
         checks.save(self.database, "hardening", 100, [warn])
         checks.save(self.database, "hardening", 120, [warn])
         monitor = SimpleNamespace(database=self.database, settings=settings,
-                                  stop=Mock(), ready=Mock())
+                                  stop=Mock(), ready=Mock(), observe_directory=None)
         monitor.stop.wait.side_effect = [False, True]
         row = checks.result("supervisor", "Supervisor", "fail", "Stale")
         with patch.object(checks.time, "time", return_value=500), \
              patch.object(checks, "health", return_value=[row]) as health, \
+             patch.object(checks.backup_health, "refresh") as backup_health, \
              patch.object(checks, "hardening") as hardening:
             checks.run(monitor)
         health.assert_called_once_with(monitor)
+        backup_health.assert_called_once_with(self.database, 500, 26)
         hardening.assert_not_called()
         with store.connect(self.database) as db:
             report = checks.read(db, settings)

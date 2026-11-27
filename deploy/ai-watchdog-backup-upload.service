@@ -8,6 +8,7 @@ ConditionPathExists=/etc/ai-watchdog/backup-upload.json
 Type=oneshot
 WorkingDirectory=/opt/ai-watchdog
 ExecStart=/usr/bin/python3 -B -m watchdog backups publish --job /etc/ai-watchdog/backup-upload.json
+ExecStopPost=/usr/bin/python3 -B -m watchdog backup-result upload
 TimeoutStartSec=45min
 PrivateTmp=yes
 NoNewPrivileges=yes

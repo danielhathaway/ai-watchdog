@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import clamd_backend, multicast, reviews, store, wsdd_policy
+from . import backup_health, clamd_backend, multicast, reviews, store, wsdd_policy
 from .common import BOOT_ID, execute, uptime, write_json
 from .process_traffic import SS
 from .responder import heartbeat
@@ -689,10 +689,17 @@ class AntivirusWorker:
 
 def run(monitor):
     collectors = (("health", lambda: health(monitor)), ("hardening", lambda: hardening(monitor.settings)))
+    next_backup_check = 0
     while not monitor.stop.wait(5):
         if not monitor.ready.is_set():
             continue
         try:
+            if monitor.observe_directory is None and time.monotonic() >= next_backup_check:
+                next_backup_check = time.monotonic() + 15
+                try:
+                    backup_health.refresh(monitor.database, time.time(), monitor.settings["backup_upload_max_hours"])
+                except (OSError, ValueError):
+                    logging.exception("Scheduled backup health check failed")
             with store.connect(monitor.database) as db:
                 saved = read(db, monitor.settings)
             for group, collect in collectors:

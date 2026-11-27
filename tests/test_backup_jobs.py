@@ -1,10 +1,11 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from watchdog import backup_job
+from watchdog import backup_health, backup_job, store
 
 
 class BackupJobTests(unittest.TestCase):
@@ -47,6 +48,22 @@ class BackupJobTests(unittest.TestCase):
                 self.remote.publish(self.ciphertext, self.workspace, 2)
         self.assertEqual(["copyto", "copyto"], calls)
 
+    def test_provider_retention_verifies_archive_without_deleting_older_objects(self):
+        commands = []
+
+        def run(operation, *arguments, capture=False):
+            commands.append((operation, *arguments))
+            if len(commands) == 2:
+                Path(arguments[-1]).write_bytes(self.ciphertext.read_bytes())
+            elif operation == "lsjson":
+                uploaded = commands[0][2].rsplit("/", 1)[-1]
+                older = f"watchdog-20260101T000000000000Z-{'a' * 16}-{'b' * 64}.age"
+                return json.dumps([{"Name": uploaded}, {"Name": older}]).encode()
+
+        with patch.object(self.remote, "run", side_effect=run):
+            self.remote.publish(self.ciphertext, self.workspace, 0)
+        self.assertEqual(["copyto", "copyto", "lsjson"], [item[0] for item in commands])
+
     def test_job_requires_dedicated_remote_and_private_credentials(self):
         job = self.workspace / "job.json"
         job.touch(mode=0o600)
@@ -63,3 +80,48 @@ class BackupJobTests(unittest.TestCase):
             backup_job.settings(job, "drill")
         credentials.chmod(0o600)
         self.assertEqual(credentials, backup_job.settings(job, "drill")["rclone_config"])
+
+
+class BackupHealthTests(unittest.TestCase):
+    def setUp(self):
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        self.config = Path(workspace.name)
+        self.database = self.config / "monitor.sqlite3"
+        store.initialize(self.database)
+        for name in backup_health.JOBS.values():
+            path = self.config / name
+            path.touch(mode=0o600)
+            os.utime(path, (100, 100))
+        self.receipts = {"upload": {}, "drill": {}}
+
+    def refresh(self, now):
+        with patch.object(backup_health, "CONFIG", self.config), patch.object(backup_health, "receipt", self.receipts.get):
+            backup_health.refresh(self.database, now, 2)
+        with store.connect(self.database) as db:
+            report = store.property_get(db, "backup_health", {})
+            events = [row[0] for row in db.execute("SELECT title FROM events ORDER BY id")]
+            return report, events
+
+    def test_upload_alert_opens_once_recovers_after_success_and_can_recur(self):
+        report, events = self.refresh(7299)
+        self.assertEqual(("waiting", 7300, []), (report["upload"]["status"], report["upload"]["deadline"], events))
+        self.refresh(7300)
+        report, events = self.refresh(7301)
+        self.assertEqual(("overdue", ["Scheduled backup upload missed"]), (report["upload"]["status"], events))
+        self.receipts["upload"] = {"success_at": 7301}
+        report, events = self.refresh(7302)
+        self.assertEqual("healthy", report["upload"]["status"])
+        self.assertEqual("Scheduled backup uploads recovered", events[-1])
+        _, events = self.refresh(14501)
+        self.assertEqual("Scheduled backup upload missed", events[-1])
+
+    def test_failed_drill_is_retained_when_recovery_precedes_the_next_poll(self):
+        self.receipts["drill"] = {"failure_at": 1000, "success_at": 1001}
+        self.refresh(1002)
+        report, events = self.refresh(1003)
+        self.assertEqual("healthy", report["drill"]["status"])
+        self.assertEqual(["Scheduled restore drill failed", "Scheduled restore drill recovered"], events)
+        (self.config / backup_health.JOBS["drill"]).unlink()
+        report, _ = self.refresh(1004)
+        self.assertNotIn("drill", report)

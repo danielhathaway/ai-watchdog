@@ -199,6 +199,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = store.snapshot(db, now)
                 data["schedule"] = schedule.read(db)
                 data["email"] = notifications.status(db)
+                data["backup_health"] = store.property_get(db, "backup_health", {})
                 data["vulnerabilities"] = vulnerabilities.summary(db)
                 data["system_checks"] = system_checks.read(db, monitor.settings)
                 reviews.annotate(db, data["events"], data["system_checks"].get("antivirus"))

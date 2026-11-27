@@ -17,6 +17,7 @@ if ! id ai-watchdog > /dev/null 2>&1; then
     useradd --system --gid ai-watchdog --no-create-home --shell /usr/sbin/nologin ai-watchdog
 fi
 install -d -o root -g root -m 0755 /opt/ai-watchdog/watchdog/static /etc/ai-watchdog
+install -d -o root -g root -m 0755 /var/lib/ai-watchdog-backup-health
 install -o root -g root -m 0644 "$source_dir/LICENSE" /opt/ai-watchdog/LICENSE
 install -o root -g root -m 0644 "$source_dir"/watchdog/*.py /opt/ai-watchdog/watchdog/
 for asset in index.html app.css app.js; do

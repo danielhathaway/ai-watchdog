@@ -54,8 +54,9 @@ def settings(path, operation):
         recipient = options["recipient"]
         if not isinstance(recipient, str) or not backup_crypto.RECIPIENT.fullmatch(recipient):
             raise ValueError("Supply a native age X25519 recipient")
-        if type(options["keep"]) is not int or not 2 <= options["keep"] <= 365:
-            raise ValueError("Backup retention must keep between 2 and 365 archives")
+        keep = options["keep"]
+        if type(keep) is not int or (keep != 0 and not 2 <= keep <= 365):
+            raise ValueError("Backup retention must keep between 2 and 365 archives, or use 0 for provider retention")
     return options
 
 
@@ -96,9 +97,10 @@ class Remote:
         names = self.names()
         if name not in names:
             raise ValueError("The verified upload was missing from the retention inventory")
-        older = [item for item in names if item != name]
-        for old in older[keep - 1:]:
-            self.run("deletefile", f"{self.folder}/{old}")
+        if keep:
+            older = [item for item in names if item != name]
+            for old in older[keep - 1:]:
+                self.run("deletefile", f"{self.folder}/{old}")
         return name
 
 
@@ -140,16 +142,19 @@ def drill_dashboard(state):
             worker.join(timeout=4)
 
 
-def drill(options, desktop):
+def drill(options, desktop, archive=None):
     remote = Remote(options)
     names = remote.names()
     if not names:
         raise ValueError("No managed encrypted archives are available for the restore drill")
+    if archive is not None and archive not in names:
+        raise ValueError("The selected archive is not in the managed off-host inventory")
+    name = archive or names[0]
     with tempfile.TemporaryDirectory(prefix="watchdog-drill-") as directory:
         ciphertext = Path(directory) / "restore.age"
-        remote.download(names[0], ciphertext)
+        remote.download(name, ciphertext)
         with backup_crypto.open_encrypted(ciphertext, options["identity"]) as source:
             if backups.read_manifest(source)["mode"] != ("desktop" if desktop else "system"):
                 raise ValueError("The backup and drill installation modes differ")
             drill_dashboard(source / "state")
-    return names[0]
+    return name
