@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from test_console_integration import TOKEN, running_console
-from watchdog import notifications, store, vulnerabilities
+from watchdog import notifications, store, userspace, vulnerabilities
 
 
 @unittest.skipUnless(os.environ.get("WATCHDOG_BROWSER_SMOKE") == "1", "Set WATCHDOG_BROWSER_SMOKE=1")
@@ -37,13 +37,24 @@ class BrowserSmoke(unittest.TestCase):
                                                                  "verifier": {"status": "failed", "failure_at": now - 30,
                                                                               "verifier": "verifier-test", "reported_at": now - 1300,
                                                                               "report_status": "overdue", "report_deadline": now - 100}})
-                        store.property_set(db, "vulnerability_summary", {
+                        vulnerability = {
                             "status": "recorded", "unresolved": 1, "known_exploited": 1,
+                            "report_at": now,
                             "sources": {"kev": {"status": "failed", "online_at": now - vulnerabilities.STALE_AFTER}},
-                            "fixes": {"reboot-required": 1},
+                            "fixes": {"reboot-required": 1, "service-restart-required": 1},
                             "priority_findings": [{"advisory": "CVE-2026-10001", "component": "linux-image-example",
                                                    "status": "affected", "fixed": "1.2",
                                                    "fix_verification": "reboot-required"}],
+                        }
+                        store.property_set(db, "vulnerability_summary", vulnerability)
+                        store.property_set(db, userspace.SUMMARY_PROPERTY, {
+                            "at": now, "report_at": now, "boot_id": userspace.BOOT_ID, "coverage": {"scope": "host"},
+                            "vulnerabilities": {**vulnerability, "service_findings_total": 2, "service_findings": [
+                                {"unit": "/system.slice/example.service", "component": "libexample",
+                                 "status": "restart-required"},
+                                {"unit": "/system.slice/restarted.service", "component": "libexample",
+                                 "status": "active"},
+                            ]},
                         })
                     listener.bind(("127.0.0.1", 0))
                     port = listener.getsockname()[1]
@@ -142,7 +153,8 @@ class BrowserSmoke(unittest.TestCase):
                  "document.querySelector('#backup-health').innerText.includes('Reports overdue') && "
                  "document.querySelector('#backup-health').innerText.includes('Report deadline') && "
                  "document.querySelector('#backup-health').innerText.includes('Last run failed')")
-        wait_for("['CISA KEV', 'Stale', 'Refresh failed', 'CVE-2026-10001', 'reboot required'].every("
+        wait_for("['CISA KEV', 'Stale', 'Refresh failed', 'CVE-2026-10001', 'reboot required', "
+                 "'example.service', 'Restart required', 'restarted.service', 'Patched files loaded'].every("
                  "label => document.querySelector('#vulnerability-status').innerText.includes(label))")
         wait_for("document.querySelector('#health-check-time').textContent.includes('Every 5 min') && "
                  "document.querySelector('#hardening-check-time').textContent.includes('Every 60 min')")

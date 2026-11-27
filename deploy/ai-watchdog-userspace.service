@@ -1,0 +1,29 @@
+[Unit]
+Description=Verify installed userspace fixes in running services
+Requires=ai-watchdog-runtime-processes.service
+After=ai-watchdog.service ai-watchdog-runtime-processes.service
+PartOf=ai-watchdog.service
+
+[Service]
+Type=oneshot
+User=ai-watchdog
+Group=ai-watchdog
+WorkingDirectory=/opt/ai-watchdog
+ExecStart=/usr/bin/python3 -B -m watchdog vulnerabilities verify-userspace --host-snapshot
+TimeoutStartSec=90s
+MemoryMax=256M
+Nice=10
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ai-watchdog
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX

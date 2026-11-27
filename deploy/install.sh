@@ -25,6 +25,7 @@ for asset in index.html app.css app.js; do
 done
 for unit in ai-watchdog.service ai-watchdog-response.service \
     ai-watchdog-vulnerability-refresh.service ai-watchdog-vulnerability-refresh.timer \
+    ai-watchdog-userspace.service ai-watchdog-userspace.timer ai-watchdog-runtime-processes.service \
     ai-watchdog-backup-upload.service ai-watchdog-backup-upload.timer \
     ai-watchdog-backup-drill.service ai-watchdog-backup-drill.timer \
     ai-watchdog-backup-verifier@.service ai-watchdog-backup-verifier@.timer; do

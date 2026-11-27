@@ -64,6 +64,8 @@ def main():
     refresh.add_argument("--ubuntu-archive", type=Path, help="Use a local copy of Canonical's OSV archive")
     refresh.add_argument("--kev-catalog", type=Path, help="Use a local copy of CISA's KEV catalog")
     refresh.add_argument("--watchdog-advisories", type=Path, help="Trusted first-party advisory manifest")
+    verification = operations.add_parser("verify-userspace", help="Check service mappings against installed fixes")
+    verification.add_argument("--host-snapshot", action="store_true", help="Read the system service process snapshot")
     listing = operations.add_parser("list", help="List saved findings")
     listing.add_argument("--all", action="store_true", help="Include findings outside the affected range")
     updates = operations.add_parser("updates", help="Check local APT candidates and manifest releases")
@@ -133,7 +135,7 @@ def main():
             serve({"port": args.port, "interval": 10, "ollama_model": ""}, state, state, demo=True)
         return
     if args.command == "vulnerabilities":
-        from . import store, vulnerabilities
+        from . import store, userspace, vulnerabilities
 
         database = args.directory / "monitor.sqlite3"
         try:
@@ -155,10 +157,19 @@ def main():
                 return
             if not database.is_file():
                 parser.error("Monitor database is missing. Check --directory.")
+            if args.operation == "verify-userspace":
+                print(json.dumps(userspace.check(database, host=args.host_snapshot), indent=2))
+                return
             with store.connect(database) as db:
                 report = store.property_get(db, "vulnerabilities", {})
                 result = {key: value for key, value in report.items() if key not in {"findings", "kev_ids"}}
                 coverage = vulnerabilities.summary(db)
+                if "userspace" in coverage:
+                    result["userspace"] = coverage["userspace"]
+                if result.get("userspace", {}).get("status") == "recorded":
+                    saved = store.property_get(db, userspace.PROPERTY, {})
+                    if saved.get("report_at") == report.get("started_at") and userspace.fresh(saved, time.time()):
+                        report = userspace.overlay(report, saved)
                 result["sources"] = coverage["sources"]
                 result["previous_boot"] = coverage["previous_boot"]
                 result["status"] = "recorded" if report else "not-checked"

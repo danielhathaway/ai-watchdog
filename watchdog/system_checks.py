@@ -56,16 +56,17 @@ def targets(config, directory):
     units = []
     if directory is None:
         units.extend(SYSTEM_UNITS / f"ai-watchdog{suffix}.service" for suffix in ("", "-response"))
-        units.extend(SYSTEM_UNITS / f"ai-watchdog-vulnerability-refresh.{suffix}" for suffix in ("service", "timer")
-                     if (SYSTEM_UNITS / f"ai-watchdog-vulnerability-refresh.{suffix}").exists())
+        scheduled = ("vulnerability-refresh.service", "vulnerability-refresh.timer",
+                     "userspace.service", "userspace.timer", "runtime-processes.service")
+        units.extend(unit for name in scheduled if (unit := SYSTEM_UNITS / f"ai-watchdog-{name}").exists())
     else:
         config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
         for suffix in ("", "-supervisor"):
             name = f"ai-watchdog-observe{suffix}.service"
             paths.add(directory / name)
             units.append(config_home / "systemd" / "user" / name)
-        for suffix in ("service", "timer"):
-            name = f"ai-watchdog-observe-vulnerability-refresh.{suffix}"
+        for suffix in ("vulnerability-refresh.service", "vulnerability-refresh.timer", "userspace.service", "userspace.timer"):
+            name = f"ai-watchdog-observe-{suffix}"
             if (directory / name).exists():
                 paths.add(directory / name)
                 units.append(config_home / "systemd" / "user" / name)

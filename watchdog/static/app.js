@@ -500,6 +500,9 @@ function render() {
       "reboot-required": "Fixed kernel installed, reboot required",
       "running-affected": "Running kernel still affected",
       "active": "Kernel fix active",
+      "service-restart-required": "Service restart required",
+      "service-runtime-unverified": "Service fix still unverified",
+      "userspace-active": "Fix active in observed services",
       "installed-runtime-unverified": "Fix installed, service runtime unverified",
       "runtime-unverified": "Kernel runtime unverified",
       "fix-not-installed": "Fix not installed",
@@ -514,12 +517,35 @@ function render() {
     }
     for (const [state, count] of Object.entries(vulnerability.fixes)) {
       vulnerabilityRows.push([fixLabels[state] || state, number.format(count),
-        (state === "reboot-required" || state === "running-affected") ? "warning-text" : ""]);
+        ["reboot-required", "running-affected", "service-restart-required", "service-runtime-unverified"].includes(state)
+          ? "warning-text" : ""]);
     }
     for (const finding of vulnerability.priority_findings) {
       const status = [finding.status.replaceAll("-", " "), fixLabels[finding.fix_verification]].filter(Boolean).join(" · ");
       const fixed = finding.fixed ? ` · fixed version ${finding.fixed}` : "";
       vulnerabilityRows.push([finding.advisory, `${finding.component} · ${status}${fixed}`, "warning-text"]);
+    }
+    const runtime = vulnerability.userspace;
+    if (runtime?.status === "recorded") {
+      const partial = runtime.scope === "user" || runtime.limited || runtime.unreadable
+        || runtime.partial_units || runtime.unreadable_packages;
+      const scope = runtime.scope === "user" ? "Visible user services" : "Host services";
+      vulnerabilityRows.push(["Userspace runtime check", `${fullDate(runtime.at)} · ${scope}${
+        partial ? " · Partial coverage" : ""}`, partial ? "warning-text" : ""]);
+      const serviceLabels = {"restart-required": "Restart required", active: "Patched files loaded",
+        unverified: "Unverified"};
+      for (const service of vulnerability.service_findings) {
+        const unit = service.unit.split("/").at(-1);
+        const user = service.unit.match(/\/user-(\d+)\.slice\//)?.[1];
+        vulnerabilityRows.push([user ? `${unit} (UID ${user})` : unit,
+          `${service.component} · ${serviceLabels[service.status]}`,
+          service.status === "active" ? "good-text" : "warning-text"]);
+      }
+      if (vulnerability.service_findings_total > vulnerability.service_findings.length) {
+        vulnerabilityRows.push(["More service results", "See vulnerabilities list --all for details"]);
+      }
+    } else if (runtime) {
+      vulnerabilityRows.push(["Userspace runtime check", "Awaiting a fresh check", "warning-text"]);
     }
   }
   get("vulnerability-status").replaceChildren(...vulnerabilityRows.map(([name, value, color]) => {

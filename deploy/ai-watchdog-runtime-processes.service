@@ -1,0 +1,29 @@
+[Unit]
+Description=Collect AI Watchdog service mapping metadata
+PartOf=ai-watchdog.service
+
+[Service]
+Type=oneshot
+User=root
+Group=ai-watchdog
+WorkingDirectory=/opt/ai-watchdog
+ExecStart=/usr/bin/python3 -B -m watchdog.runtime_processes
+RuntimeDirectory=ai-watchdog-runtime-processes
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+TimeoutStartSec=90s
+MemoryMax=128M
+UMask=0077
+CapabilityBoundingSet=CAP_SYS_PTRACE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=~ptrace process_vm_readv process_vm_writev pidfd_getfd

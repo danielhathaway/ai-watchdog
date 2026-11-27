@@ -1,6 +1,6 @@
 [Unit]
 Description=AI Watchdog endpoint monitor and local console
-Wants=ai-watchdog-vulnerability-refresh.timer
+Wants=ai-watchdog-vulnerability-refresh.timer ai-watchdog-userspace.timer
 
 [Service]
 Type=simple

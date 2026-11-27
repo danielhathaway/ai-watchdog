@@ -17,7 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 from urllib.request import urlopen
 
-from . import __version__, store
+from . import __version__, store, userspace
 from .common import BOOT_ID
 
 UBUNTU_FEED = "https://security-metadata.canonical.com/osv/osv-all.tar.xz"
@@ -430,7 +430,8 @@ def refresh_locked(database, archive, manifest, kev_path):
 def unresolved(report):
     return [row for row in report.get("findings", {}).values()
             if (row["status"] in {"affected", "vendor-listed", "unverified"}
-                or row.get("fix_verification") in {"reboot-required", "running-affected"})]
+                or row.get("fix_verification") in {"reboot-required", "running-affected",
+                                                   "service-restart-required", "service-runtime-unverified"})]
 
 
 def select_findings(report, *, include_all=False, advisory=None, scope=None):
@@ -455,11 +456,20 @@ def report_summary(report):
     matches = select_findings(report)
     exploited = [row for row in matches if row.get("known_exploited")]
     fixes = defaultdict(int)
+    services = {}
     for row in report["findings"].values():
         if state := row.get("fix_verification"):
             fixes[state] += 1
+        for unit, evidence in row.get("service_verification", {}).items():
+            services[unit, row["component"]] = evidence["status"]
+    rank = {"restart-required": 0, "unverified": 1, "active": 2}
+    ordered_services = sorted(services.items(), key=lambda item: (rank[item[1]], *item[0]))
     return {"status": "recorded", "unresolved": len(matches), "sources": report["sources"],
             "known_exploited": len(exploited), "fixes": dict(fixes),
+            "report_at": report["started_at"],
+            "service_findings": [{"unit": unit, "component": component, "status": state}
+                                 for (unit, component), state in ordered_services[:12]],
+            "service_findings_total": len(services),
             "kernel_check": report["kernel_check"],
             "priority_findings": [{key: row[key] for key in ("advisory", "component", "status", "fixed")}
                                   | {"fix_verification": row.get("fix_verification")} for row in exploited[:5]]}
@@ -508,6 +518,13 @@ def summary(db, now=None):
     saved = store.property_get(db, "vulnerability_summary", {"status": "not-checked"})
     health = store.property_get(db, "vulnerability_feed_health", {})
     now = time.time() if now is None else now
+    runtime = store.property_get(db, userspace.SUMMARY_PROPERTY, {})
+    if runtime:
+        current = userspace.fresh(runtime, now) and runtime["report_at"] == saved.get("report_at")
+        if current:
+            saved = runtime["vulnerabilities"]
+        saved = {**saved, "userspace": {"status": "recorded" if current else "awaiting-recheck",
+                                        "at": runtime["at"], **runtime["coverage"]}}
     sources = saved.get("sources", {})
     since = {name: source.get("attempted_at", source.get("checked_at", now))
              for name, source in sources.items() if name == "kev" or name.startswith("Ubuntu:")}

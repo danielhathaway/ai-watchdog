@@ -473,7 +473,22 @@ sudo -u ai-watchdog -- python3 -B -m watchdog vulnerabilities list
 
 Watchdog records findings, source status and scan time in the monitor database. The Sensors page and active AI check include the saved summary. A failed refresh preserves prior findings. `list --all` includes entries outside the affected range and removed packages. A `vendor-listed` finding has no known fix threshold and may still be awaiting vendor evaluation. APT update candidates reflect locally cached indexes. A missing or incomparable candidate is reported as unknown. Add `--advisory` to focus on one advisory, `--scope dependency` to filter package findings, or `--limit 0` to return all matching rows.
 
-`list` and `updates` put applicable CISA catalog entries first. To verify remediation, run a refresh after installing updates or rebooting, then use `list --all --advisory CVE-YYYY-NNNN` to see the saved fix status. Watchdog checks the installed source version against the vendor's fix threshold. For a supported Ubuntu kernel, it also compares the [running build signature](https://ubuntu.com/kernel#identifying-a-kernel) with the relevant installed kernel build and advisory. A fixed kernel on disk with an affected build still running is reported as requiring a reboot. The console labels evidence from an earlier boot. For userspace packages, Watchdog verifies installation and reports service runtime as unverified. Package and reboot decisions remain under the operator's OS update policy.
+`list` and `updates` put applicable CISA catalog entries first. To verify remediation, run a refresh after installing updates or rebooting, then use `list --all --advisory CVE-YYYY-NNNN` to see the saved fix status. Watchdog checks the installed source version against the vendor's fix threshold. For a supported Ubuntu kernel, it also compares the [running build signature](https://ubuntu.com/kernel#identifying-a-kernel) with the relevant installed kernel build and advisory. A fixed kernel on disk with an affected build still running is reported as requiring a reboot. The console labels kernel evidence from an earlier boot.
+
+### Verify userspace fixes in running services
+
+After an advisory refresh recognizes a fixed Ubuntu package, the userspace check looks for its executable files and libraries in systemd service processes. It uses device and inode identity to compare loaded files with files owned by the installed package. A replaced mapping keeps the finding open as **Service restart required**. After an operator restarts the service, **Patched files loaded** means Watchdog observed the matching current mappings. An unreadable, stopped, or changed service can remain unverified. Prior observations help attribute removed versioned libraries to their original package. Watchdog observes native executable mappings in host system directories. It does not verify interpreted code, container filesystems, or live process memory contents, and it never restarts monitored services.
+
+The installer adds a check every 15 minutes. The system-wide check collects mapping metadata through a separate, restricted local service. The desktop check sees only services readable by the desktop account. **Sensors → Known vulnerabilities** displays the last check, coverage, and service results. Results need a new check after a reboot, a new advisory report, or 30 minutes without fresh evidence.
+
+Run a check immediately after a service restart, or use the corresponding timer on the next cycle:
+
+```sh
+systemctl --user start ai-watchdog-observe-userspace.service
+sudo systemctl start ai-watchdog-userspace.service
+```
+
+View service details with `vulnerabilities list --all` using the monitor's state directory. Single-advisory details show the service cgroup and any replaced paths. From a desktop checkout, `python3 -m watchdog vulnerabilities --directory .watchdog verify-userspace` checks visible services directly.
 
 To scan Watchdog's own release, place a trusted first-party manifest in `watchdog-advisories.json` in the state directory or pass `--watchdog-advisories PATH`. The optional `available_version` is the current release offered by that manifest. This example uses a fictional advisory.
 

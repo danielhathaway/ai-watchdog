@@ -1,0 +1,8 @@
+[Unit]
+Description=Check AI Watchdog userspace fixes every fifteen minutes
+PartOf=ai-watchdog.service
+
+[Timer]
+OnActiveSec=90s
+OnCalendar=*:0/15
+RandomizedDelaySec=1min
