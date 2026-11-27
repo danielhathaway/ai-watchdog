@@ -54,12 +54,21 @@ The response service starts the monitor. Open [127.0.0.1:8765](http://127.0.0.1:
 | Traffic | Inbound and outbound interface counters, excluding loopback |
 | TCP | Established connections, pending outbound handshakes, and distinct pending inbound peers |
 | SSH | Failed authentication from the systemd units `ssh.service` and `sshd.service` with OpenSSH journal messages |
+| SSH activity correlation | Successful SSH login, root sudo session, and a corroborated change to the same target requested from that session |
 | Devices | IPv4 and IPv6 neighbor-cache entries, remembered by hardware address and interface |
 | File integrity | Content hash, target, ownership, and permissions against a root-managed baseline |
 
 The statistical detector learns a robust baseline for traffic and established TCP connections from up to 720 recent normal samples per metric. It needs 30 valid samples per metric to begin reporting deviations. An active check refreshes local evidence and uses the latest completed traffic window to evaluate bandwidth against that history. Traffic inspection covers rates and connection metadata. Device observations cover entries visible in the local cache and do not establish a device's identity or presence independently.
 
 For an optional natural-language summary, configure a downloaded local Ollama model in `ollama_model`. Run Ollama in local-only mode at `127.0.0.1:11434` with cloud features disabled. Restart the monitor after editing the model setting. The optional model sees numeric evidence, coverage, and event category counts. The statistical assessment continues if the model is unavailable. The model output has no command or rule execution privileges. [Ollama local-only configuration](https://github.com/ollama/ollama/blob/main/docs/faq.mdx)
+
+### SSH activity correlation
+
+Watchdog looks for an accepted SSH login followed within 10 minutes by a root sudo session linked to the same audit or systemd session. It requires a sudo command naming the changed target and independent evidence within 90 seconds. For a system `start` or `restart`, it checks the systemd manager's record for that exact service. For `enable`, `reenable`, or `link`, it checks local enablement symlink metadata. For direct writes through supported `sudoedit`, `tee`, `cp`, or `install` commands, it checks the named system unit, drop-in, cron file, sudo policy, SSH server configuration, or other supported system persistence file.
+
+The rule reports unapproved targets in **Activity** with the SSH account, source address, timestamps, and corroborating evidence. Service starts are medium severity and persistence changes are high severity. Set `"ssh_activity_allowed_targets": ["example.service", "/etc/cron.d/example"]` in the monitor configuration for routine targets you want the rule to ignore. The rule only emits alerts and works independently of firewall or isolation policy.
+
+The system installation can read the system journal through its existing service permissions. Desktop coverage depends on what the account can read. **Sensors → SSH activity correlation** reports degraded coverage if journal access fails or the read limit is exceeded. The rule requires the relevant OpenSSH, sudo PAM, and journal session records. Changes made through a generic root shell, file removals, and user service changes are outside this rule's scope. Each scan prunes normalized correlation fields older than 11 minutes and 30 seconds. Raw sudo command lines and SSH key fingerprints stay in the journal. [Trusted journal fields](https://www.freedesktop.org/software/systemd/man/latest/systemd.journal-fields.html)
 
 ### Network interface totals and spike history
 

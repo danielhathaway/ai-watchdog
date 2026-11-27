@@ -141,7 +141,7 @@ def health(monitor):
     alive = response["watchdog_alive"]
     observing = response["status"] == "observing"
     with store.connect(monitor.database) as db:
-        sensors = store.property_get(db, "sensors", {})
+        sensors = store.sensor_status(db)
     unavailable = [name for name, state in sensors.items() if state != "ready"]
     insecure = []
     missing = []

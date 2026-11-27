@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 
-from . import analysis, sensors, store, system_checks
+from . import analysis, sensors, ssh_activity, store, system_checks
 from .network_window import NetworkSampler
 from .common import BASELINE, BOOT_ID, CONFIG, RESPONSE_RUNTIME, blockable, uptime, write_json
 
@@ -48,6 +48,7 @@ class Monitor:
         if not self.demo:
             threading.Thread(target=system_checks.run, args=(self,), name="scheduled-system-checks",
                              daemon=True).start()
+            threading.Thread(target=ssh_activity.run, args=(self,), name="ssh-activity", daemon=True).start()
             if self.antivirus:
                 threading.Thread(target=self.antivirus.run, name="antivirus", daemon=True).start()
 

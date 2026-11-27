@@ -36,6 +36,7 @@ DEFAULTS = {
     "antivirus_clamd": False,
     "allowed_listeners": [],
     "allowed_listener_rules": [],
+    "ssh_activity_allowed_targets": [],
 }
 
 
@@ -103,6 +104,13 @@ def configuration(path=CONFIG):
     settings["antivirus_paths"] = sorted(set(paths))
     if set(settings["isolate_on_integrity"]) - set(settings["integrity_paths"]):
         raise ValueError("Isolation paths must be included in integrity_paths")
+    from .ssh_activity import persistence_path, unit_name
+
+    targets = settings["ssh_activity_allowed_targets"]
+    if (not isinstance(targets, list) or len(targets) > 128
+            or any(not (unit_name(target) or persistence_path(target)) for target in targets)):
+        raise ValueError("Invalid ssh_activity_allowed_targets entry")
+    settings["ssh_activity_allowed_targets"] = sorted(set(targets))
     settings["protected_networks"] = [
         ipaddress.ip_network(network) for network in settings["protected_networks"]
     ]

@@ -8,6 +8,7 @@
   "blocked_macs": [],
   "integrity_paths": ["/etc/passwd", "/etc/group", "/etc/ld.so.preload"],
   "isolate_on_integrity": [],
+  "ssh_activity_allowed_targets": [],
   "ollama_model": "",
   "retention_days": 30,
   "email_alerts": null,

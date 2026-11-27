@@ -24,6 +24,7 @@ on:
       - 'watchdog/notifications.py'
       - 'watchdog/common.py'
       - 'watchdog/monitor.py'
+      - 'watchdog/ssh_activity.py'
       - 'watchdog/reviews.py'
       - 'watchdog/rollback.py'
       - 'watchdog/system_checks.py'
@@ -42,6 +43,7 @@ on:
       - 'tests/test_backup_jobs.py'
       - 'tests/test_recurring_and_email.py'
       - 'tests/test_vulnerabilities.py'
+      - 'tests/test_ssh_activity.py'
   pull_request:
     paths: *eicar-paths
   workflow_dispatch:

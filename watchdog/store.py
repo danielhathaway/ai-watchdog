@@ -2,6 +2,11 @@ import json
 import sqlite3
 from contextlib import closing, contextmanager
 
+from .common import BOOT_ID
+
+SSH_ACTIVITY_STATE = "ssh_activity"
+SSH_ACTIVITY_SENSOR = "SSH activity correlation"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (
     id INTEGER PRIMARY KEY, at REAL NOT NULL, rx REAL, tx REAL, connections INTEGER,
@@ -73,6 +78,15 @@ def property_get(db, key, default=None):
 
 def property_set(db, key, value):
     db.execute("INSERT OR REPLACE INTO properties VALUES (?, ?)", (key, json.dumps(value)))
+
+
+def sensor_status(db):
+    sensors = property_get(db, "sensors", {})
+    row = db.execute("SELECT json_extract(value, '$.boot_id'), json_extract(value, '$.status') "
+                     "FROM properties WHERE key=?", (SSH_ACTIVITY_STATE,)).fetchone()
+    if row and row[0] == BOOT_ID:
+        sensors[SSH_ACTIVITY_SENSOR] = row[1]
+    return sensors
 
 
 def event(db, at, severity, kind, title, detail="", subject="", cooldown=0):
@@ -167,6 +181,6 @@ def snapshot(db, now):
             "SELECT count(*) FROM events WHERE severity IN ('high','critical') AND at>=?",
             (now - 86400,),
         ).fetchone()[0],
-        "sensors": property_get(db, "sensors", {}),
+        "sensors": sensor_status(db),
         "assessment": property_get(db, "assessment"),
     }
