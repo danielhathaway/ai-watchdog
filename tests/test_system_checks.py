@@ -462,7 +462,7 @@ udp UNCONN 0 0 *:10001 *:* users:(("wsdd",pid=2,fd=8)) ino:51 sk:ba cgroup:/user
              patch.object(checks, "hardening") as hardening:
             checks.run(monitor)
         health.assert_called_once_with(monitor)
-        backup_health.assert_called_once_with(self.database, 500, 26)
+        backup_health.assert_called_once_with(self.database, 500, 26, 170)
         hardening.assert_not_called()
         with store.connect(self.database) as db:
             report = checks.read(db, settings)

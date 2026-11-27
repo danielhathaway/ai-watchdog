@@ -1,0 +1,17 @@
+[Unit]
+Description=Sync Watchdog verifier status (%i)
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/ai-watchdog/backup-verifier-%i.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ai-watchdog
+ExecStart=/usr/bin/python3 -B -m watchdog backup-verifier %i
+TimeoutStartSec=3min
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ai-watchdog-backup-health
+NoNewPrivileges=yes
+UMask=0077

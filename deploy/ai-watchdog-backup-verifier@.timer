@@ -1,0 +1,9 @@
+[Unit]
+Description=Synchronize Watchdog verifier status (%i)
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=5min
+
+[Install]
+WantedBy=timers.target

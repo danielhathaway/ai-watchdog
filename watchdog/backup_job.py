@@ -30,6 +30,12 @@ def private_file(path):
         yield stream
 
 
+def validate_remote(remote):
+    if (not isinstance(remote, str) or not REMOTE.fullmatch(remote) or len(remote) > 300
+            or {".", ".."} & set(remote.split(":", 1)[1].split("/"))):
+        raise ValueError("Use a named rclone remote and a dedicated subdirectory, such as offsite:backups/endpoint")
+
+
 def settings(path, operation):
     with private_file(path) as stream:
         raw = stream.read(16385)
@@ -40,10 +46,7 @@ def settings(path, operation):
     required.update({"recipient", "keep"} if operation == "publish" else {"identity"})
     if not isinstance(options, dict) or set(options) != required:
         raise ValueError(f"Backup {operation} configuration requires {', '.join(sorted(required))}")
-    remote = options["remote"]
-    if (not isinstance(remote, str) or not REMOTE.fullmatch(remote) or len(remote) > 300
-            or {".", ".."} & set(remote.split(":", 1)[1].split("/"))):
-        raise ValueError("Use a named rclone remote and a dedicated subdirectory, such as offsite:backups/endpoint")
+    validate_remote(options["remote"])
     for key in required & {"rclone_config", "identity"}:
         if not isinstance(options[key], str) or not options[key]:
             raise ValueError(f"Expected a filename for {key}")

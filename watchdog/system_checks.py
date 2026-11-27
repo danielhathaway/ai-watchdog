@@ -697,7 +697,8 @@ def run(monitor):
             if monitor.observe_directory is None and time.monotonic() >= next_backup_check:
                 next_backup_check = time.monotonic() + 15
                 try:
-                    backup_health.refresh(monitor.database, time.time(), monitor.settings["backup_upload_max_hours"])
+                    backup_health.refresh(monitor.database, time.time(), monitor.settings["backup_upload_max_hours"],
+                                          monitor.settings["backup_drill_max_hours"])
                 except (OSError, ValueError):
                     logging.exception("Scheduled backup health check failed")
             with store.connect(monitor.database) as db:

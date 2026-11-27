@@ -14,6 +14,7 @@ on:
       - 'watchdog/backups.py'
       - 'watchdog/backup_crypto.py'
       - 'watchdog/backup_health.py'
+      - 'watchdog/backup_verifier.py'
       - 'watchdog/backup_job.py'
       - 'watchdog/clamd_backend.py'
       - 'watchdog/notifications.py'

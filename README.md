@@ -341,7 +341,22 @@ journalctl -u ai-watchdog-backup-drill.service
 
 The weekly drill downloads the newest archive, checks the digest, verifies the decrypted manifest and SQLite database, and starts an isolated authenticated dashboard using scratch state, with enforcement and email disabled. Check the timer and service journal for the result. If the system must be recovered, download the desired encrypted archive and run `backups verify` and `backups restore` with the private identity on the destination.
 
-**Sensors → Off-host backups** shows the upload deadline, the last successful run, and any recorded failures for jobs configured on that host. Activity records a missed upload when there has been no verified upload for 26 hours and records a failed restore drill after the systemd job exits unsuccessfully. It also records recovery. Set `backup_upload_max_hours` in the Watchdog monitor configuration if you change the upload schedule. Run the Watchdog monitor on the verifier to see its drill status in that host's dashboard.
+**Sensors → Off-host backups** shows job deadlines, the last successful runs, and recorded failures. Activity records uploads overdue by default after 26 hours and drills overdue after 170 hours without success. It also records drill failures and recoveries. Set `backup_upload_max_hours` or `backup_drill_max_hours` in the Watchdog monitor configuration if you change a schedule.
+
+To see a separate verifier's results on the primary dashboard, reserve a dedicated writable status subdirectory outside the immutable archives. Generate a shared reporting key with `openssl rand -hex 32` and securely install the same key file on both hosts. Keep the reporting key separate from the age identity. Use mode `0600` for the job files, key, and rclone credentials. Put side-specific rclone credentials under `/etc/ai-watchdog`, granting the verifier write access to the status object and the primary read access. Use this configuration on both hosts with their respective local credential filenames.
+
+```json
+{
+  "verifier": "recovery-host",
+  "remote": "offsite:watchdog-status/endpoint01",
+  "rclone_config": "backup-verifier-rclone.conf",
+  "key_file": "backup-verifier.key"
+}
+```
+
+On the verifier, save it as `/etc/ai-watchdog/backup-verifier-report.json` and enable `ai-watchdog-backup-verifier@report.timer`. On the primary, save it as `/etc/ai-watchdog/backup-verifier-import.json` and enable `ai-watchdog-backup-verifier@import.timer`. Use `sudo systemctl enable --now` for each timer. To test immediately, start the verifier's `ai-watchdog-backup-verifier@report.service` and then the primary's `ai-watchdog-backup-verifier@import.service`. The timers sync about every five minutes. Keep both clocks synchronized.
+
+The verifier sends authenticated outcome timestamps. The primary rejects tampered reports and keeps the last accepted result when a sync fails or replays an older report. **Sensors → Off-host backups** displays the latest report time alongside **Remote verifier**, and **Activity** records its failed, overdue, and recovered drills.
 
 To rotate the age key, generate a new identity on the verifier, replace the uploader's public `recipient`, publish a new archive, and update the verifier's drill identity. Keep the retired identity in recovery storage for as long as any archive encrypted to it is retained. Older immutable archives stay encrypted to their original recipients. To rehearse an older recovery point, run `backups drill --job /path/to/private-job.json --archive ARCHIVE_NAME` with a job file pointing to the retired identity, or download the archive and verify it directly.
 
@@ -395,7 +410,7 @@ GitHub Actions runs the EICAR smoke test on pull requests and pushes to `main` t
 
 The backup-restore scenario creates a real backup on one VM and verifies it on a separately installed VM with a different machine ID. It checks that configuration, dashboard access, acknowledged EICAR evidence, and timed antivirus history survive the restore.
 
-The system-backup-restore scenario requires `age-keygen` and `rclone` on the host. It verifies EICAR detection under Ubuntu's unchanged ClamD AppArmor profile and exercises ClamScan fallback. The storage fixture tests normal retention and enforces write-once rules on a separate archive directory. The test checks both dashboard alerts and their recoveries, confirms overwrites and deletes are refused, then restores pre-rotation and post-rotation archives on a fresh Ubuntu VM using their respective keys. The temporary private identities are supplied only to the destination VM.
+The system-backup-restore scenario requires `age-keygen` and `rclone` on the host. It verifies EICAR detection under Ubuntu's unchanged ClamD AppArmor profile and exercises ClamScan fallback. The storage fixture tests normal retention and enforces write-once rules on a separate archive directory. The test checks missed uploads, overdue drills and their recoveries, confirms overwrites and deletes are refused, then restores pre-rotation and post-rotation archives on a fresh Ubuntu VM using their respective keys. A separate primary VM imports the verifier's signed report and shows the alerts in its dashboard. The temporary private age identities are supplied only to the restore VM.
 
 ### Benchmark multi-path antivirus scans
 

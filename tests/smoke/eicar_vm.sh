@@ -27,6 +27,7 @@ if [[ $mode == system-backup-restore ]]; then
         "$keygen" -o "$transfer/$key.identity" 2>"$transfer/keygen.log"
         "$keygen" -y "$transfer/$key.identity" >"$transfer/$key.recipient"
     done
+    python3 -c 'import secrets; print(secrets.token_hex(32))' >"$transfer/report-key"
     read -r port backend_port password < <(python3 - <<'PY'
 import secrets
 import socket
@@ -48,12 +49,13 @@ PY
         "$port" "$("$rclone" obscure "$password")" >"$transfer/rclone.conf"
     bash "$0" "$1" system-backup-source "$transfer/donor-proof"
     bash "$0" "$1" system-backup-destination "$transfer/donor-proof"
+    bash "$0" "$1" system-backup-primary "$transfer/donor-proof"
     echo WATCHDOG_ENCRYPTED_SYSTEM_RESTORE_VM_PASS
     exit
 fi
 case "$mode" in
     desktop|desktop-upgrade|system-upgrade) ;;
-    backup-source|backup-destination|system-backup-source|system-backup-destination)
+    backup-source|backup-destination|system-backup-source|system-backup-destination|system-backup-primary)
         : "${3:?Missing private backup transfer path}" ;;
     *) echo "Unknown mode: $mode" >&2; exit 2 ;;
 esac
@@ -112,7 +114,7 @@ PY
 ssh-keygen -q -t ed25519 -N '' -C watchdog-smoke-vm -f "$work/vm-key"
 sources=(LICENSE deploy/install-user.sh deploy/install.sh deploy/install-clamav.sh deploy/config.json
          deploy/ai-watchdog.service deploy/ai-watchdog-response.service watchdog)
-jobs=(deploy/ai-watchdog-backup-{upload,drill}.{service,timer})
+jobs=(deploy/ai-watchdog-backup-{upload,drill,verifier@}.{service,timer})
 tar -C "$repo" --exclude=__pycache__ -czf "$work/source.tgz" "${sources[@]}" "${jobs[@]}"
 if [[ $mode == *-upgrade ]]; then
     # Last release before alert-review metadata was added.
@@ -127,6 +129,11 @@ elif [[ $mode == system-backup-destination ]]; then
     cp -- "$(dirname -- "$3")/"{retired,current}.identity "$work/"
     cp -- "$(dirname -- "$3")/rclone.conf" "$work/rclone.conf"
     cp -- "$3" "$work/donor-proof"
+elif [[ $mode == system-backup-primary ]]; then
+    cp -- "$(dirname -- "$3")/rclone.conf" "$work/rclone.conf"
+fi
+if [[ $mode == system-backup-destination || $mode == system-backup-primary ]]; then
+    cp -- "$(dirname -- "$3")/report-key" "$work/report-key"
 fi
 python3 - "$work" "$smoke/eicar_guest.py" "$dashboard_port" "$mode" <<'PY'
 import base64
@@ -150,6 +157,8 @@ if mode == "system-backup-source":
         files.append((work / f"{key}.recipient", f"/var/tmp/watchdog-age-{key}.recipient", "0600"))
 if mode.startswith("system-backup-"):
     files.append((work / "rclone.conf", "/var/tmp/watchdog-test-rclone.conf", "0600"))
+if mode in ("system-backup-destination", "system-backup-primary"):
+    files.append((work / "report-key", "/var/tmp/watchdog-report-key", "0600"))
 if mode == "system-backup-destination":
     for key in ("retired", "current"):
         files.append((work / f"{key}.identity", f"/var/tmp/watchdog-age-{key}.identity", "0600"))
@@ -195,7 +204,7 @@ if [[ $mode == *backup-source ]]; then
         -p "$ssh_port" ubuntu@127.0.0.1 "${fetch[@]}" >"$3"
     test -s "$3"
     exit
-elif [[ $mode == *backup-destination ]]; then
+elif [[ $mode == *backup-destination || $mode == system-backup-primary ]]; then
     exit
 fi
 PYTHONPATH="$repo/tests:$repo" python3 -B "$smoke/eicar_browser.py" "$work" "$ssh_port" "$dashboard_port" "$mode"

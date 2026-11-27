@@ -102,6 +102,8 @@ def main():
             job.add_argument("--archive", help="Drill a specific retained archive instead of the newest one")
     receipt = actions.add_parser("backup-result", help="Record a systemd backup job result")
     receipt.add_argument("job", choices=("upload", "drill"))
+    sync = actions.add_parser("backup-verifier", help="Send or import authenticated verifier results")
+    sync.add_argument("operation", choices=("report", "import"))
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -113,6 +115,14 @@ def main():
             backup_health.record(args.job, time.time(), os.environ)
         except (OSError, ValueError) as error:
             parser.exit(1, f"Could not record scheduled backup result: {error}\n")
+        return
+    if args.command == "backup-verifier":
+        from . import backup_verifier
+
+        try:
+            backup_verifier.sync(args.operation, time.time())
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            parser.exit(1, f"Could not sync verifier status: {error}\n")
         return
     if args.command == "demo":
         if not 1024 <= args.port <= 65535:

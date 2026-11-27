@@ -22,6 +22,7 @@ REPO = Path("/home/ubuntu/watchdog-smoke")
 EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 OFFSITE = "offsite:backups/system"
 IMMUTABLE = "offsite:backups/immutable"
+VERIFIER_STATUS = "offsite:backups/status"
 RCLONE_CONFIG = "/var/tmp/watchdog-test-rclone.conf"
 
 
@@ -285,6 +286,31 @@ class Guest:
                            and any(event["title"] == title for event in snapshot["events"]), title)
         matching = [event for event in report["events"] if event["title"] == title and event["kind"] == "backup"]
         assert len(matching) == 1, matching
+        return report["backup_health"][job]
+
+    def configure_verifier_reports(self, operation):
+        directory = Path("/etc/ai-watchdog")
+        job = directory / f"backup-verifier-{operation}.json"
+        run("install", "-m", "0600", RCLONE_CONFIG, str(directory / "backup-verifier-rclone.conf"))
+        run("install", "-m", "0600", "/var/tmp/watchdog-report-key", str(directory / "backup-verifier.key"))
+        job.touch(mode=0o600)
+        job.write_text(json.dumps({"verifier": "verifier-smoke", "remote": VERIFIER_STATUS,
+                                   "rclone_config": "backup-verifier-rclone.conf", "key_file": "backup-verifier.key"}))
+        run("systemctl", "enable", f"ai-watchdog-backup-verifier@{operation}.timer")
+        return job
+
+    def verify_primary_dashboard(self):
+        self.configure([])
+        job = self.configure_verifier_reports("import")
+        overdue = time.time() - 171 * 3600
+        os.utime(job, (overdue, overdue))
+        self.check_backup_health("verifier", "overdue", "Verifier restore drill overdue")
+        run_backup_job("verifier@import")
+        self.check_backup_health("verifier", "healthy", "Verifier restore drill failed")
+        self.check_backup_health("verifier", "healthy", "Verifier restore drill recovered")
+        result = self.check_backup_health("verifier", "healthy", "Verifier restore drill is current again")
+        assert result["verifier"] == "verifier-smoke" and result["failure_at"] < result["success_at"] <= result["reported_at"]
+        print("WATCHDOG_EICAR_VERIFIER separate primary dashboard recorded overdue, failed and recovered verifier drills", flush=True)
 
     def scheduled_uploads(self):
         conf = Path("/etc/ai-watchdog")
@@ -372,14 +398,19 @@ class Guest:
             job = conf / "backup-drill.json"
             job.touch(mode=0o600)
             job.write_text(json.dumps({"remote": IMMUTABLE, "rclone_config": "rclone.conf", "identity": "identity"}))
+            overdue = time.time() - 171 * 3600
+            os.utime(job, (overdue, overdue))
             run("install", "-m", "0600", RCLONE_CONFIG, str(conf / "backup-drill-rclone.conf"))
             retired = "/var/tmp/watchdog-age-retired.identity"
             current = "/var/tmp/watchdog-age-current.identity"
             run("install", "-m", "0600", retired, str(conf / "backup-drill-identity"))
+            self.configure_verifier_reports("report")
             run("systemctl", "enable", "ai-watchdog-backup-drill.timer")
+            self.check_backup_health("drill", "overdue", "Scheduled restore drill overdue")
             failed = subprocess.run(["systemctl", "start", "ai-watchdog-backup-drill.service"], capture_output=True)
             assert failed.returncode, "The retired key unexpectedly opened the new archive"
-            self.check_backup_health("drill", "failed", "Scheduled restore drill failed")
+            self.check_backup_health("drill", "overdue", "Scheduled restore drill failed")
+            run_backup_job("verifier@report")
             run("install", "-m", "0600", current, str(conf / "backup-drill-identity"))
             run_backup_job("drill")
             journal = subprocess.check_output(
@@ -387,6 +418,8 @@ class Guest:
             assert "Could not decrypt the backup with this age identity" in journal, journal
             assert f"authenticated dashboard health check: {proof['archive']}" in journal, journal
             self.check_backup_health("drill", "healthy", "Scheduled restore drill recovered")
+            self.check_backup_health("drill", "healthy", "Scheduled restore drill is current again")
+            run_backup_job("verifier@report")
             assert self.config.read_bytes() == original_config and (self.state / "token").read_bytes() == original_token
             print("WATCHDOG_EICAR_DRILL wrong key raised a dashboard alert, rotated key recovered the isolated drill", flush=True)
             pinned = Path("/var/tmp/watchdog-pinned-drill.json")
@@ -446,6 +479,10 @@ class Guest:
             run("systemctl", "mask", "--now", "apt-daily.timer", "apt-daily-upgrade.timer")
         self.install(LEGACY if upgrading else CURRENT)
         encrypted = self.mode.startswith("system-backup-")
+        if self.mode == "system-backup-primary":
+            run("apt-get", "install", "-y", "rclone")
+            self.verify_primary_dashboard()
+            return
         if encrypted:
             run("apt-get", "install", "-y", "age", "rclone")
         assert subprocess.check_output(["systemctl", "is-enabled", "clamav-freshclam.service"], text=True).strip() == "enabled"
