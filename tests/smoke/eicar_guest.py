@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Install and exercise real Watchdog services inside a disposable Ubuntu VM."""
 
+import hashlib
 import json
 from pathlib import Path
 import platform
@@ -10,6 +11,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -27,7 +29,7 @@ def run(*args):
 class Guest:
     def __init__(self, port, mode):
         self.mode = mode
-        self.desktop = mode != "system-upgrade"
+        self.desktop = not mode.startswith("system-")
         self.origin = f"http://127.0.0.1:{port}"
         self.port = port
         if self.desktop:
@@ -57,9 +59,10 @@ class Guest:
         installer = "install-user.sh" if self.desktop else "install.sh"
         run(*self.user, str(REPO / "deploy" / installer))
 
-    def configure(self, paths):
+    def configure(self, paths, **options):
         config = json.loads(self.config.read_text())
         config.update(port=self.port, antivirus_paths=[str(path) for path in paths])
+        config.update(options)
         self.config.write_text(json.dumps(config))
         self.restart()
 
@@ -245,17 +248,39 @@ class Guest:
         print("WATCHDOG_EICAR_RECOVERY stale signatures blocked a scan and recovered with a current signature age")
 
     def backups(self, *arguments):
-        return subprocess.check_output((*self.user, "/usr/bin/python3", "-B", "-m", "watchdog",
-                                        "backups", "--desktop", *arguments), cwd=REPO, text=True)
+        command = (*self.user, "/usr/bin/python3", "-B", "-m", "watchdog", "backups")
+        if self.desktop:
+            command += ("--desktop",)
+        return subprocess.check_output((*command, *arguments), cwd=REPO if self.desktop else "/opt/ai-watchdog", text=True)
+
+    def install_private_clamd(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(["apt-get", "download", "clamav-daemon"], check=True, cwd=directory)
+            package, = Path(directory).glob("*.deb")
+            run("dpkg-deb", "-x", str(package), directory)
+            run("install", "-m", "0755", f"{directory}/usr/sbin/clamd", "/usr/sbin/clamd")
 
     def export_backup(self, event):
         self.request(f"/api/alerts/{event['id']}/acknowledge", "POST")
-        self.scan("pass", readiness="ready")
+        clean = self.scan("pass", readiness="ready")
         output = self.backups("create")
         backup = Path(output.strip().removeprefix("Backup created: "))
         assert backup.is_dir(), output
         assert json.loads(self.backups("list"))[0]["path"] == str(backup)
         assert "verification passed" in self.backups("verify", str(backup))
+        if not self.desktop:
+            coverage, = clean["system_checks"]["antivirus"]["checks"][0]["coverage"]
+            assert coverage["backend"] == "clamscan" and coverage["fallback"], coverage
+            recipient = Path("/var/tmp/watchdog-age-recipient").read_text().strip()
+            self.backups("export", str(backup), "/var/tmp/watchdog-backup-export.age", "--recipient", recipient)
+            proof = {
+                "machine_id": Path("/etc/machine-id").read_text().strip(),
+                "token": hashlib.sha256((backup / "state/token").read_bytes()).hexdigest(),
+                "config": hashlib.sha256((backup / "state/config.json").read_bytes()).hexdigest(),
+            }
+            Path("/var/tmp/watchdog-donor-proof").write_text(json.dumps(proof))
+            print("WATCHDOG_EICAR_BACKUP encrypted system donor backup after verifying ClamD and fallback")
+            return
         (backup / "donor-machine-id").write_bytes(Path("/etc/machine-id").read_bytes())
         archive = Path("/var/tmp/watchdog-backup-export.tgz")
         archive.touch(mode=0o600, exist_ok=False)
@@ -269,6 +294,22 @@ class Guest:
         self.configure([])
         self.wait(lambda status: status["ready"], "a newly installed destination")
         original_token = (self.state / "token").read_bytes()
+        if not self.desktop:
+            proof = json.loads(Path("/var/tmp/watchdog-donor-proof").read_text())
+            assert proof["machine_id"] != Path("/etc/machine-id").read_text().strip()
+            encrypted = "/var/tmp/watchdog-imported.age"
+            identity = ("--identity", "/var/tmp/watchdog-age-identity")
+            assert "verification passed" in self.backups("verify", encrypted, *identity)
+            output = self.backups("restore", encrypted, *identity)
+            assert "dashboard health check passed" in output, output
+            token = (self.state / "token").read_bytes()
+            assert token != original_token and hashlib.sha256(token).hexdigest() == proof["token"]
+            assert hashlib.sha256(self.config.read_bytes()).hexdigest() == proof["config"]
+            self.check_restored_dashboard()
+            history = self.request("/api/antivirus/history")["results"]
+            assert {"clamd", "clamscan"} <= {row["backend"] for row in history}, history
+            print("WATCHDOG_EICAR_RESTORE encrypted state verified on a fresh system-wide VM")
+            return
         backup = self.state / "rollbacks/backup-import"
         backup.parent.mkdir(mode=0o700, exist_ok=True)
         backup.mkdir(mode=0o700)
@@ -281,6 +322,10 @@ class Guest:
         assert self.config.read_bytes() == (backup / "state/config.json").read_bytes()
         token = (self.state / "token").read_bytes()
         assert token != original_token and token == (backup / "state/token").read_bytes()
+        self.check_restored_dashboard()
+        print("WATCHDOG_EICAR_RESTORE distinct fresh VM restored configuration, token, alert review and coverage history")
+
+    def check_restored_dashboard(self):
         self.port = json.loads(self.config.read_text())["port"]
         self.origin = f"http://127.0.0.1:{self.port}"
         status = self.wait(lambda report: report["ready"], "the restored dashboard")
@@ -290,26 +335,33 @@ class Guest:
         assert {item["status"] for item in history} >= {"pass", "fail"}, history
         assert all(item["duration_seconds"] is not None for item in history), history
         assert "manifest-present" in self.backups("list")
-        print("WATCHDOG_EICAR_RESTORE distinct fresh VM restored configuration, token, alert review and coverage history")
 
     def exercise(self):
         upgrading = self.mode.endswith("-upgrade")
         self.install(LEGACY if upgrading else CURRENT)
+        encrypted = self.mode.startswith("system-backup-")
+        if encrypted:
+            run("apt-get", "install", "-y", "age")
         assert subprocess.check_output(["systemctl", "is-enabled", "clamav-freshclam.service"], text=True).strip() == "enabled"
         run("systemctl", "is-active", "--quiet", "clamav-freshclam.service")
         print(f"WATCHDOG_EICAR_INSTALL mode={self.mode} FreshClam is enabled and active")
-        if self.mode == "backup-destination":
+        if self.mode.endswith("backup-destination"):
             self.restore_backup()
             return
         wait_for_signatures()
+        if self.mode == "system-backup-source":
+            self.install_private_clamd()
         self.scope.mkdir(mode=0o755, parents=True)
         (self.scope / "benign.txt").write_text("Benign file for the clean antivirus rescan.\n")
         sample = self.scope / ("legacy-eicar.com.txt" if upgrading else "eicar.com.txt")
         sample.write_bytes(EICAR)
         try:
             started = time.time()
-            self.configure([self.scope])
+            self.configure([self.scope], **({"antivirus_clamd": True} if self.mode == "system-backup-source" else {}))
             report, event = self.detection(self.wait_scan(started, "fail"), sample)
+            if self.mode == "system-backup-source":
+                coverage, = report["checks"][0]["coverage"]
+                assert coverage["backend"] == "clamd", coverage
             if upgrading:
                 older_event = event
                 self.verify_upgrade(report, event)
@@ -329,7 +381,12 @@ class Guest:
                 self.verify_rollback(report, event, older_event)
             finally:
                 sample.unlink()
-        if self.mode == "backup-source":
+        if self.mode == "system-backup-source":
+            # A restart removes the running private instance. The next scan must fall back.
+            Path("/usr/sbin/clamd").rename("/usr/sbin/clamd.smoke-disabled")
+            self.restart()
+            self.wait(lambda state: state["ready"], "the reloaded service before fallback")
+        if self.mode.endswith("backup-source"):
             self.export_backup(event)
         print(f"WATCHDOG_EICAR_ACTIVITY event={event['id']} severity={event['severity']} detail={event['detail']}")
 

@@ -23,17 +23,20 @@ def configuration(value, directory):
     fields = {
         "host": "", "port": 587, "security": "starttls", "sender": "", "recipient": "",
         "minimum_severity": "high", "username": "", "password_file": "",
+        "coverage_notify_minutes": 0,
     }
     if not isinstance(value, dict) or set(value) - set(fields):
         raise ValueError("Invalid email_alerts configuration")
     fields.update(value)
-    for key in fields.keys() - {"port"}:
+    for key in fields.keys() - {"port", "coverage_notify_minutes"}:
         if not isinstance(fields[key], str) or len(fields[key]) > 512 or (fields[key] and not fields[key].isprintable()):
             raise ValueError(f"Invalid email_alerts {key}")
     if not HOST.fullmatch(fields["host"]) or ".." in fields["host"]:
         raise ValueError("email_alerts requires an SMTP hostname or IPv4 address")
     if type(fields["port"]) is not int or not 1 <= fields["port"] <= 65535:
         raise ValueError("Invalid SMTP port")
+    if type(fields["coverage_notify_minutes"]) is not int or not 0 <= fields["coverage_notify_minutes"] <= 10080:
+        raise ValueError("coverage_notify_minutes must be between 0 and 10080")
     if fields["security"] not in ("starttls", "tls"):
         raise ValueError("SMTP requires starttls or tls")
     for key in ("sender", "recipient"):
@@ -66,8 +69,9 @@ def send(settings, events):
     message["From"] = settings["sender"]
     message["To"] = settings["recipient"]
     critical = any(event["severity"] == "critical" for event in events)
-    level = "Critical" if critical else "High"
-    message["Subject"] = f"AI Watchdog · {level} severity ({len(events)})"
+    level = ("Critical severity" if critical else "High severity" if any(event["severity"] == "high" for event in events)
+             else "Antivirus coverage warning")
+    message["Subject"] = f"AI Watchdog · {level} ({len(events)})"
     lines = [
         f'{datetime.fromtimestamp(event["at"], timezone.utc):%Y-%m-%d %H:%M UTC}'
         f'  {event["severity"].upper()}  {event["title"]}'
@@ -96,6 +100,8 @@ def send(settings, events):
 
 def prepare(db, settings):
     destination = {key: settings[key] for key in ("recipient", "sender", "host", "port", "minimum_severity")} if settings else None
+    if destination is not None and settings.get("coverage_notify_minutes"):
+        destination["coverage_notify_minutes"] = settings["coverage_notify_minutes"]
     if store.property_get(db, "email_destination") != destination:
         db.execute("DELETE FROM email_outbox")
         store.property_set(db, "email_delivery", {})
@@ -109,10 +115,49 @@ def status(db):
     return {
         "enabled": destination is not None,
         "minimum_severity": destination["minimum_severity"] if destination else None,
+        "coverage_notify_minutes": destination.get("coverage_notify_minutes", 0) if destination else 0,
         "pending": count,
         "last_sent_at": delivery.get("last_sent_at"),
         "retry_at": delivery.get("next_at") if delivery.get("failures") and count else None,
     }
+
+
+def queue_coverage(database, settings, paths, now):
+    delay = settings.get("coverage_notify_minutes", 0)
+    if not delay:
+        return
+    with store.connect(database) as db:
+        db.execute("BEGIN IMMEDIATE")
+        incidents = store.property_get(db, "antivirus_coverage_incidents", {})
+        saved = store.property_get(db, "antivirus_coverage_notifications", {})
+        pending = {}
+        for queued in db.execute("SELECT path,outbox_id FROM coverage_email").fetchall():
+            if queued["path"] not in (paths or []) or incidents.get(queued["path"], 0) < 3:
+                db.execute("DELETE FROM email_outbox WHERE id=?", (queued["outbox_id"],))
+        for path in paths or []:
+            if incidents.get(path, 0) < 3:
+                continue
+            incident = saved.get(path)
+            reported = db.execute(
+                "SELECT max(at) FROM events WHERE kind='antivirus-coverage' AND subject=? AND severity='medium'",
+                (path,),
+            ).fetchone()[0]
+            if incident is None or (reported is not None and reported > incident["degraded_at"]):
+                incident = {"degraded_at": reported if reported is not None else now, "notified": False}
+            pending[path] = incident
+            if incident["notified"] or now - incident["degraded_at"] < delay * 60:
+                continue
+            inserted = db.execute(
+                "INSERT INTO email_outbox(at,severity,title) VALUES (?, 'medium', ?)",
+                (now, "Antivirus path coverage remains degraded"),
+            )
+            old = db.execute("SELECT outbox_id FROM coverage_email WHERE path=?", (path,)).fetchone()
+            if old:
+                db.execute("DELETE FROM email_outbox WHERE id=?", (old[0],))
+            db.execute("INSERT INTO coverage_email VALUES (?, ?)", (path, inserted.lastrowid))
+            pending[path] = {**incident, "notified": True}
+        if pending != saved:
+            store.property_set(db, "antivirus_coverage_notifications", pending)
 
 
 def deliver(database, settings, now):

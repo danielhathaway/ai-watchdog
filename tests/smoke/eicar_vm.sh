@@ -2,7 +2,7 @@
 # Boot a fresh overlay from an Ubuntu 24.04 amd64 cloud image.
 set -euo pipefail
 if [[ $# -lt 1 || $# -gt 3 || ! -r $1 ]]; then
-    echo "Usage: bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img [desktop|desktop-upgrade|system-upgrade|backup-restore]" >&2
+    echo "Usage: bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img [desktop|desktop-upgrade|system-upgrade|backup-restore|system-backup-restore]" >&2
     exit 2
 fi
 mode=${2:-desktop}
@@ -15,9 +15,22 @@ if [[ $mode == backup-restore ]]; then
     echo WATCHDOG_FRESH_RESTORE_VM_PASS
     exit
 fi
+if [[ $mode == system-backup-restore ]]; then
+    umask 077
+    transfer=$(mktemp -d)
+    trap 'rm -rf -- "$transfer"' EXIT
+    keygen=${WATCHDOG_AGE_KEYGEN:-age-keygen}
+    "$keygen" -o "$transfer/identity" 2>"$transfer/keygen.log"
+    "$keygen" -y "$transfer/identity" >"$transfer/recipient"
+    bash "$0" "$1" system-backup-source "$transfer/backup.age"
+    bash "$0" "$1" system-backup-destination "$transfer/backup.age"
+    echo WATCHDOG_ENCRYPTED_SYSTEM_RESTORE_VM_PASS
+    exit
+fi
 case "$mode" in
     desktop|desktop-upgrade|system-upgrade) ;;
-    backup-source|backup-destination) : "${3:?Missing private backup transfer path}" ;;
+    backup-source|backup-destination|system-backup-source|system-backup-destination)
+        : "${3:?Missing private backup transfer path}" ;;
     *) echo "Unknown mode: $mode" >&2; exit 2 ;;
 esac
 image=$(realpath -- "$1")
@@ -28,7 +41,7 @@ variables=${WATCHDOG_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 for command in python3 qemu-img qemu-system-x86_64 ssh ssh-keygen timeout xorriso; do
     command -v "$command" >/dev/null || { echo "Missing $command" >&2; exit 1; }
 done
-if [[ $mode != backup-* ]]; then
+if [[ $mode != *backup-* ]]; then
     command -v "${WATCHDOG_GECKODRIVER:-geckodriver}" >/dev/null || { echo "Missing GeckoDriver." >&2; exit 1; }
 fi
 for file in "$firmware" "$variables"; do
@@ -82,6 +95,12 @@ if [[ $mode == *-upgrade ]]; then
 fi
 if [[ $mode == backup-destination ]]; then
     cp -- "$3" "$work/imported.tgz"
+elif [[ $mode == system-backup-source ]]; then
+    cp -- "$(dirname -- "$3")/recipient" "$work/recipient"
+elif [[ $mode == system-backup-destination ]]; then
+    cp -- "$3" "$work/imported.age"
+    cp -- "$(dirname -- "$3")/identity" "$work/identity"
+    cp -- "$3.proof" "$work/donor-proof"
 fi
 python3 - "$work" "$smoke/eicar_guest.py" "$dashboard_port" "$mode" <<'PY'
 import base64
@@ -100,6 +119,12 @@ if mode.endswith("-upgrade"):
     files.append((work / "legacy.tgz", "/var/tmp/watchdog-legacy.tgz", "0644"))
 if mode == "backup-destination":
     files.append((work / "imported.tgz", "/var/tmp/watchdog-imported.tgz", "0600"))
+if mode == "system-backup-source":
+    files.append((work / "recipient", "/var/tmp/watchdog-age-recipient", "0600"))
+if mode == "system-backup-destination":
+    files.extend(((work / "imported.age", "/var/tmp/watchdog-imported.age", "0600"),
+                  (work / "identity", "/var/tmp/watchdog-age-identity", "0600"),
+                  (work / "donor-proof", "/var/tmp/watchdog-donor-proof", "0600")))
 for source, target, permissions in files:
     payload = base64.b64encode(source.read_bytes()).decode()
     config.extend((f"  - path: {target}", f"    permissions: '{permissions}'", "    encoding: b64", f"    content: {payload}"))
@@ -133,13 +158,20 @@ until grep -aq WATCHDOG_EICAR_GUEST_PASS "$work/guest.log" 2>/dev/null; do
     sleep 2
 done
 grep -a 'WATCHDOG_EICAR_' "$work/guest.log"
-if [[ $mode == backup-source ]]; then
+if [[ $mode == *backup-source ]]; then
+    fetch=(cat /var/tmp/watchdog-backup-export.tgz)
+    [[ $mode != system-backup-source ]] || fetch=(sudo -n cat /var/tmp/watchdog-backup-export.age)
     ssh -T -i "$work/vm-key" -o BatchMode=yes -o IdentitiesOnly=yes \
         -o "UserKnownHostsFile=$work/known_hosts" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 \
-        -p "$ssh_port" ubuntu@127.0.0.1 cat /var/tmp/watchdog-backup-export.tgz >"$3"
+        -p "$ssh_port" ubuntu@127.0.0.1 "${fetch[@]}" >"$3"
     test -s "$3"
+    if [[ $mode == system-backup-source ]]; then
+        ssh -T -i "$work/vm-key" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o "UserKnownHostsFile=$work/known_hosts" -o StrictHostKeyChecking=yes -o ConnectTimeout=6 \
+            -p "$ssh_port" ubuntu@127.0.0.1 sudo -n cat /var/tmp/watchdog-donor-proof >"$3.proof"
+    fi
     exit
-elif [[ $mode == backup-destination ]]; then
+elif [[ $mode == *backup-destination ]]; then
     exit
 fi
 PYTHONPATH="$repo/tests:$repo" python3 -B "$smoke/eicar_browser.py" "$work" "$ssh_port" "$dashboard_port" "$mode"

@@ -79,7 +79,9 @@ class Console(socketserver.ThreadingMixIn, HTTPServer):
     def run_email_delivery(self, email):
         while not self.monitor.stop.wait(10):
             try:
-                notifications.deliver(self.monitor.database, email, time.time())
+                now = time.time()
+                notifications.queue_coverage(self.monitor.database, email, self.monitor.settings.get("antivirus_paths"), now)
+                notifications.deliver(self.monitor.database, email, now)
             except Exception:
                 logging.error("Email alert worker failed")
 

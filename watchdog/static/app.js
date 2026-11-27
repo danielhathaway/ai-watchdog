@@ -617,10 +617,12 @@ function coverageRow(path) {
   if (path.access_errors) counts.push(`Access errors: ${number.format(path.access_errors)}`);
   if (path.scan_errors) counts.push(`Scan errors: ${number.format(path.scan_errors)}`);
   if (path.limit_hits) counts.push(`File or archive limit hits: ${number.format(path.limit_hits)}`);
+  if (path.backend) counts.push(path.fallback ? "ClamScan fallback" : path.backend === "clamd" ? "ClamD" : "ClamScan");
   if (path.duration_seconds != null) {
     counts.push(`Elapsed: ${path.duration_seconds.toLocaleString([], {maximumFractionDigits: 3})} s`);
   }
   detail.append(element("strong", outcomes[path.status], style[path.status]), element("span", path.detail));
+  if (path.fallback) detail.append(element("span", path.fallback));
   if (counts.length) detail.append(element("span", counts.join(" · ")));
   const label = element("dt", path.path);
   if (path.at != null) label.append(element("small", ` · ${fullDate(path.at)}`));
@@ -668,6 +670,7 @@ function renderSettings() {
     ["Pending alerts", number.format(email.pending)],
     ["Last accepted by SMTP", email.last_sent_at ? fullDate(email.last_sent_at) : "None yet"],
   ] : [["Delivery", "Off"]];
+  if (email.coverage_notify_minutes) values.push(["Unresolved coverage", `Email after ${email.coverage_notify_minutes} min`]);
   if (email.retry_at) values.push(["Next retry", fullDate(email.retry_at)]);
   get("email-status").replaceChildren(...values.map(([name, value]) => {
     const row = element("div");

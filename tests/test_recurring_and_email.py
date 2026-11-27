@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from watchdog import monitor, notifications, schedule, store
+from watchdog import monitor, notifications, schedule, store, system_checks
 from watchdog.server import Console, Handler
 
 
@@ -118,6 +118,37 @@ class RecurringAndEmailTests(unittest.TestCase):
             status = notifications.status(db)
             self.assertEqual((1, 165), (status["pending"], status["retry_at"]))
             notifications.prepare(db, {**self.email, "recipient": "other@example.com"})
+            self.assertEqual(0, notifications.status(db)["pending"])
+
+    def test_coverage_email_waits_for_unresolved_incidents_and_cancels_on_recovery(self):
+        path = "/private/scan/path"
+        settings = {**self.email, "minimum_severity": "critical", "coverage_notify_minutes": 2}
+        failed = {"path": path, "status": "warn", "access_errors": 1}
+        clean = {"path": path, "status": "pass", "files_scanned": 1}
+        with store.connect(self.database) as db:
+            notifications.prepare(db, settings)
+            for at in (10, 20, 30):
+                system_checks.update_coverage_alerts(db, at, [failed])
+        notifications.queue_coverage(self.database, self.email, [path], 500)
+        notifications.queue_coverage(self.database, settings, [path], 149)
+        with store.connect(self.database) as db:
+            self.assertEqual(0, notifications.status(db)["pending"])
+        for at in (150, 151):
+            notifications.queue_coverage(self.database, settings, [path], at)
+        with store.connect(self.database) as db:
+            self.assertEqual(1, notifications.status(db)["pending"])
+            system_checks.update_coverage_alerts(db, 152, [clean])
+            self.assertEqual(0, notifications.status(db)["pending"])
+            for at in (160, 170, 180):
+                system_checks.update_coverage_alerts(db, at, [failed])
+        notifications.queue_coverage(self.database, settings, [path], 300)
+        with patch.object(notifications.smtplib, "SMTP") as client:
+            notifications.deliver(self.database, settings, 301)
+            message = client.return_value.send_message.call_args.args[0]
+            self.assertIn("Antivirus coverage warning", message["Subject"])
+            self.assertNotIn(path, message.get_content())
+        notifications.queue_coverage(self.database, settings, [path], 1000)
+        with store.connect(self.database) as db:
             self.assertEqual(0, notifications.status(db)["pending"])
 
     def test_smtp_password_is_read_only_from_private_regular_file(self):

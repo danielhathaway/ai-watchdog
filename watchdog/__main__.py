@@ -39,6 +39,8 @@ def serve(settings, state, runtime, demo=False, baseline=BASELINE, response_runt
             console.serve_forever()
         finally:
             monitor.stop.set()
+            if monitor.antivirus:
+                monitor.antivirus.shutdown()
 
 
 def main():
@@ -87,6 +89,11 @@ def main():
     for name in ("verify", "restore"):
         action = backup_actions.add_parser(name, help=f"{name.title()} a backup directory")
         action.add_argument("source", type=Path)
+        action.add_argument("--identity", type=Path, help="Private age identity for an encrypted archive")
+    export = backup_actions.add_parser("export", help="Encrypt a sealed backup for off-host storage")
+    export.add_argument("source", type=Path)
+    export.add_argument("destination", type=Path)
+    export.add_argument("--recipient", required=True, help="Public native age X25519 recipient")
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -158,7 +165,9 @@ def main():
             parser.exit(1, f"Vulnerability check failed: {error}\n")
         return
     if args.command in {"rollback", "backups"}:
-        from . import backups
+        from contextlib import nullcontext
+
+        from . import backup_crypto, backups
         from .rollback import Deployment, RollbackError
 
         if args.config != CONFIG:
@@ -172,12 +181,20 @@ def main():
                 print(f"Backup created: {installation.create_backup()}")
             elif args.operation == "list":
                 print(json.dumps(backups.inventory(installation.backups), indent=2))
-            elif args.operation == "verify":
-                backups.verify(args.source.resolve(strict=True))
-                print("Backup verification passed.")
+            elif args.operation == "export":
+                backup_crypto.export_backup(args.source.resolve(strict=True), args.destination.absolute(), args.recipient)
+                print(f"Encrypted backup exported: {args.destination}")
             else:
-                installation.restore(args.source)
-                print("Restore completed. The dashboard health check passed.")
+                source = args.source.resolve(strict=True)
+                opened = (backup_crypto.open_encrypted(source, args.identity.absolute()) if args.identity
+                          else nullcontext(source))
+                with opened as backup_directory:
+                    if args.operation == "verify":
+                        backups.verify(backup_directory)
+                        print("Backup verification passed.")
+                    else:
+                        installation.restore(backup_directory)
+                        print("Restore completed. The dashboard health check passed.")
         except (RollbackError, OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as error:
             parser.exit(1, f"{args.command} failed: {error}\n")
         return

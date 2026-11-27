@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from deploy.udp.multicast_collector import parse_output
-from watchdog import store, system_checks as checks
+from watchdog import clamd_backend, store, system_checks as checks
 from watchdog.common import BOOT_ID, configuration, write_json
 
 
@@ -111,6 +111,71 @@ class SystemChecksTests(unittest.TestCase):
         self.assertIn("before this path was scanned", report["coverage"][1]["detail"])
         self.assertEqual(checks.ANTIVIRUS_TIMEOUT, report["coverage"][0]["duration_seconds"])
         self.assertIsNone(report["coverage"][1]["duration_seconds"])
+
+    def test_clamd_scan_uses_open_files_and_skips_symlinks(self):
+        root = self.directory / "files"
+        root.mkdir()
+        (root / "safe").write_bytes(b"clean")
+        (root / "limited").write_bytes(b"limit")
+        (root / "detected").write_bytes(b"test")
+        (root / "ignored").symlink_to(self.database)
+        daemon = clamd_backend.ClamD()
+
+        def query(command, deadline, fd):
+            self.assertEqual(b"FILDES", command)
+            import os
+            content = os.read(fd, 50)
+            return {"clean": "fd: OK", "limit": "fd: Heuristics.Limits.Exceeded.MaxFileSize FOUND",
+                    "test": "fd: Eicar-Test-Signature FOUND"}[content.decode()]
+
+        with patch.object(daemon, "query", side_effect=query) as scan:
+            row = daemon.scan_path(str(root), float("inf"))
+        self.assertEqual(3, scan.call_count)
+        self.assertEqual(("fail", 2, 1, 1), (row["status"], row["files_scanned"], row["detections"], row["limit_hits"]))
+        self.assertIn(str(root / "detected"), row["detail"])
+
+    def test_clamd_rejects_unverified_signatures_and_falls_back(self):
+        daemon = clamd_backend.ClamD()
+        with patch.object(clamd_backend.subprocess, "Popen") as start, \
+             patch.object(checks, "antivirus_readiness", return_value={"state": "stale-signatures"}), \
+             patch.object(checks, "antivirus_path", return_value={"status": "warn", "files_scanned": 0,
+                          "scan_errors": 0, "access_errors": 0, "limit_hits": 0, "detail": "Stale signatures"}):
+            row, = checks.antivirus(["/downloads"], daemon=daemon)["coverage"]
+        start.assert_not_called()
+        self.assertEqual("clamscan", row["backend"])
+        self.assertIn("signatures", row["fallback"])
+
+    def test_clamd_socket_failure_falls_back_within_the_same_scan(self):
+        daemon = Mock()
+        daemon.scan_path.side_effect = clamd_backend.ClamDError("socket failed")
+        clean = {"status": "pass", "files_scanned": 1, "scan_errors": 0,
+                 "access_errors": 0, "limit_hits": 0, "detail": "Clean"}
+        with patch.object(checks, "antivirus_path", return_value=clean) as standalone, \
+             patch.object(checks, "antivirus_readiness", return_value={"state": "ready"}):
+            report = checks.antivirus(["/first", "/next"], daemon=daemon)
+        self.assertEqual("pass", report["status"])
+        self.assertEqual(1, daemon.scan_path.call_count)
+        self.assertEqual(2, standalone.call_count)
+        self.assertTrue(all(row["fallback"] == "socket failed" for row in report["coverage"]))
+
+    def test_clamd_detection_survives_interrupted_scan_and_incomplete_fallback(self):
+        root = self.directory / "files"
+        root.mkdir()
+        for name in ("file-one", "file-two"):
+            (root / name).write_text("test input")
+        daemon = clamd_backend.ClamD()
+        incomplete = {"status": "warn", "files_scanned": 0, "scan_errors": 0,
+                      "access_errors": 0, "limit_hits": 0, "detail": "Timed out"}
+        with patch.object(daemon, "prepare"), patch.object(daemon, "query", side_effect=[
+                "fd: Eicar-Test-Signature FOUND", clamd_backend.ClamDError("socket failed")]), \
+             patch.object(checks, "antivirus_readiness", return_value={"state": "ready"}), \
+             patch.object(checks, "antivirus_path", return_value=incomplete) as standalone:
+            report = checks.antivirus([str(root)], daemon=daemon)
+        row, = report["coverage"]
+        standalone.assert_called_once()
+        self.assertEqual(("fail", 1, "clamd", "socket failed"),
+                         (report["status"], row["detections"], row["backend"], row["fallback"]))
+        self.assertIn("interrupted after this detection", row["detail"])
 
     def test_coverage_alerts_fire_once_and_recover_only_after_verified_coverage(self):
         path = "/downloads"

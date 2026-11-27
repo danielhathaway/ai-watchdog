@@ -30,6 +30,7 @@ DEFAULTS = {
     "hardening_check_minutes": 60,
     "antivirus_paths": [],
     "antivirus_check_minutes": 1440,
+    "antivirus_clamd": False,
     "allowed_listeners": [],
     "allowed_listener_rules": [],
 }
@@ -58,6 +59,8 @@ def configuration(path=CONFIG):
         raise ValueError("heartbeat_timeout must cover at least three scans")
     if type(settings["enforce"]) is not bool:
         raise ValueError("enforce must be a boolean")
+    if type(settings["antivirus_clamd"]) is not bool:
+        raise ValueError("antivirus_clamd must be a boolean")
     listeners = settings["allowed_listeners"]
     if not isinstance(listeners, list) or len(listeners) > 256 or any(
         not isinstance(item, str) or not re.fullmatch(r"(?:tcp|udp)/[1-9][0-9]{0,4}", item)

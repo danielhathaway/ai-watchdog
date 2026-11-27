@@ -2,12 +2,14 @@ import io
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from watchdog import backups, rollback, store
+from watchdog import backup_crypto, backups, rollback, store
 
 
 class RollbackTests(unittest.TestCase):
@@ -93,6 +95,50 @@ class RollbackTests(unittest.TestCase):
         with self.assertRaises(OSError):
             rollback.copy_regular(link, output)
         self.assertFalse(output.exists())
+
+    def test_encrypted_backup_rejects_path_traversal_and_links(self):
+        for member in (tarfile.TarInfo("../outside"), tarfile.TarInfo("state/token")):
+            if member.name == "state/token":
+                member.type = tarfile.SYMTYPE
+                member.linkname = "/outside"
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w") as archive:
+                archive.addfile(member)
+            stream.seek(0)
+            with self.assertRaisesRegex(ValueError, "unsafe or duplicate"):
+                backup_crypto.unpack(stream, self.directory)
+        self.assertEqual([], list(self.directory.iterdir()))
+
+    def test_native_age_roundtrip_and_ciphertext_tampering(self):
+        binary = Path(os.environ.get("WATCHDOG_TEST_AGE", backup_crypto.AGE))
+        keygen = binary.with_name("age-keygen")
+        if not binary.is_file() or not keygen.is_file():
+            self.skipTest("age and age-keygen are required")
+        source = self.directory / "backup"
+        source.mkdir(mode=0o700)
+        state = source / "state"
+        state.mkdir(mode=0o700)
+        (state / "config.json").write_text('{"port":9001}')
+        (state / "token").write_text("a" * 43)
+        store.initialize(state / "monitor.sqlite3")
+        backups.seal(source, desktop=True)
+        identity = self.directory / "identity"
+        subprocess.run([keygen, "-o", identity], capture_output=True, check=True)
+        recipient = subprocess.check_output([keygen, "-y", identity], text=True).strip()
+        encrypted = self.directory / "backup.age"
+        with patch.object(backup_crypto, "AGE", str(binary)):
+            backup_crypto.export_backup(source, encrypted, recipient)
+            self.assertTrue(encrypted.read_bytes().startswith(b"age-encryption.org/v1\n"))
+            self.assertNotIn(b"a" * 43, encrypted.read_bytes())
+            self.assertEqual(0o600, encrypted.stat().st_mode & 0o777)
+            with backup_crypto.open_encrypted(encrypted, identity) as imported:
+                self.assertEqual("desktop", backups.verify(imported)["mode"])
+                self.assertEqual("a" * 43, (imported / "state/token").read_text())
+            damaged = encrypted.read_bytes()
+            encrypted.write_bytes(damaged[:-1] + bytes([damaged[-1] ^ 1]))
+            with self.assertRaisesRegex(ValueError, "Could not decrypt"):
+                with backup_crypto.open_encrypted(encrypted, identity):
+                    self.fail("Tampered backup was accepted")
 
     def test_inventory_and_verification_detect_tampering(self):
         managed = self.directory / "inventory"

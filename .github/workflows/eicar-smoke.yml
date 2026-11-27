@@ -11,6 +11,9 @@ on:
       - 'deploy/install-clamav.sh'
       - 'watchdog/__main__.py'
       - 'watchdog/backups.py'
+      - 'watchdog/backup_crypto.py'
+      - 'watchdog/clamd_backend.py'
+      - 'watchdog/notifications.py'
       - 'watchdog/common.py'
       - 'watchdog/monitor.py'
       - 'watchdog/reviews.py'
@@ -39,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [desktop, desktop-upgrade, system-upgrade, backup-restore]
+        mode: [desktop, desktop-upgrade, system-upgrade, backup-restore, system-backup-restore]
     defaults:
       run:
         shell: bash
@@ -52,7 +55,7 @@ jobs:
       - name: Install VM tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf xorriso ubuntu-keyring
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf xorriso ubuntu-keyring age
 
       - name: Download and verify the Ubuntu cloud image
         working-directory: ${{ runner.temp }}

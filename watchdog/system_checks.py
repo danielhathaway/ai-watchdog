@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import multicast, reviews, store, wsdd_policy
+from . import clamd_backend, multicast, reviews, store, wsdd_policy
 from .common import BOOT_ID, execute, uptime, write_json
 from .process_traffic import SS
 from .responder import heartbeat
@@ -493,13 +493,32 @@ def antivirus_path(path, timeout):
     return {**report, "status": "pass", "detail": f"No malware reported across {scanned} scanned files."}
 
 
-def antivirus(paths):
+def antivirus(paths, *, daemon=None):
     deadline = time.monotonic() + ANTIVIRUS_TIMEOUT
     coverage = []
+    fallback = None
+    if daemon is not None:
+        try:
+            daemon.prepare(antivirus_readiness(time.time()), deadline)
+        except (clamd_backend.ClamDError, OSError) as error:
+            fallback = str(error)
     for path in paths:
         started = time.monotonic()
-        remaining = deadline - started
-        row = antivirus_path(path, remaining)
+        remaining = timeout = deadline - started
+        partial = None
+        if daemon is not None and fallback is None:
+            try:
+                row = daemon.scan_path(path, deadline)
+            except (clamd_backend.ClamDError, OSError) as error:
+                fallback = str(error)
+                partial = error.partial if isinstance(error, clamd_backend.ClamDError) else None
+                timeout = deadline - time.monotonic()
+        if daemon is None or fallback is not None:
+            row = {**antivirus_path(path, timeout), "backend": "clamscan"}
+            if partial is not None and row["status"] != "fail":
+                row = {**partial, "detail": partial["detail"] + " The scan was interrupted after this detection."}
+            if fallback:
+                row["fallback"] = fallback
         coverage.append({**row, "duration_seconds": round(time.monotonic() - started, 3) if remaining > 0 else None})
     detections = [row for row in coverage if row["status"] == "fail"]
     incomplete = [row for row in coverage if row["status"] == "warn"]
@@ -553,6 +572,8 @@ def update_coverage_alerts(db, now, coverage):
         elif count:
             # Unavailable scans and empty paths provide no evidence that coverage recovered.
             current[path] = count
+    for path in previous.keys() - current.keys():
+        db.execute("DELETE FROM email_outbox WHERE id IN (SELECT outbox_id FROM coverage_email WHERE path=?)", (path,))
     if current != previous:
         store.property_set(db, "antivirus_coverage_incidents", current)
 
@@ -613,6 +634,11 @@ class AntivirusWorker:
         self.requested = threading.Event()
         self.running = False
         self.readiness = {"state": "checking"}
+        self.daemon = clamd_backend.ClamD() if monitor.settings.get("antivirus_clamd") else None
+
+    def shutdown(self):
+        if self.daemon is not None:
+            self.daemon.close()
 
     def request(self):
         with self.lock:
@@ -636,7 +662,7 @@ class AntivirusWorker:
             self.running = True
             self.requested.clear()
         try:
-            row = antivirus(self.paths)
+            row = antivirus(self.paths, daemon=self.daemon) if self.daemon is not None else antivirus(self.paths)
             save(self.monitor.database, "antivirus", time.time(), [row], paths=self.paths)
         finally:
             with self.lock:

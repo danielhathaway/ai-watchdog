@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, severity TEXT NOT NULL, title TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS email_outbox_time ON email_outbox(at);
+CREATE TABLE IF NOT EXISTS coverage_email (
+    path TEXT PRIMARY KEY, outbox_id INTEGER NOT NULL REFERENCES email_outbox(id) ON DELETE CASCADE
+);
 """
 
 

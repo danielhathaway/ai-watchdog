@@ -157,6 +157,8 @@ Open **Sensors → Antivirus coverage history** to see previous path results und
 
 Activity records a medium-severity coverage alert after three successive scans report a path access error, scan error, or file or archive limit. Further failures for that path leave the incident open without repeating the alert. An information event records recovery when ClamAV scans files on that path without reporting an error or limit. Empty paths and scanner-wide failures provide no evidence of recovery.
 
+To opt into the warm backend, install the matching `clamav-daemon` package and set `"antivirus_clamd": true`, then restart Watchdog. It starts its own unprivileged ClamD process on a private Unix socket and passes files opened by the monitor account. The private process loads official signatures and reports scanner limit hits. Watchdog compares the loaded signature version with the current on-disk database before scanning. Startup failures, version mismatches, and ambiguous scan replies fall back to ClamScan within the same scan time limit. The per-path coverage view records which backend ran and the reason for a fallback. [ClamD protocol documentation](https://docs.clamav.net/manual/Usage/ClamdProtocol.html)
+
 ### Optional Wi-Fi-only GNOME discovery
 
 On Ubuntu systems with the `wsdd` package, an enforced `/usr/bin/wsdd` AppArmor profile, and GNOME’s `wsdd` backend, find your Wi-Fi interface with `ip -brief link`. From a trusted checkout run the following, replacing `wlp5s0` with that interface.
@@ -211,6 +213,8 @@ systemctl --user restart ai-watchdog-observe.service
 For a system-wide installation, use a local TLS relay allowed by the service's loopback network policy. Apply configuration changes with the maintenance sequence below. Check relay connectivity and delivery while in observe mode before relying on alerts.
 
 New high and critical events enter a local queue. Set `minimum_severity` to `critical` for critical-only alerts. Each email includes event titles, severity, and timestamps. IP addresses, device identities, file paths, and raw logs stay in Watchdog. Delivery is batched, retried on failure, and expires after 24 hours. The Settings page shows pending alerts, the next retry, and the last time SMTP accepted a batch. If the computer is disconnected, alerts can only be delivered once the relay becomes reachable again.
+
+Set `"coverage_notify_minutes": 60` inside `email_alerts` to opt into one email per path incident that stays unresolved for 60 minutes after Watchdog records degradation. This policy applies independently of `minimum_severity`. Use 0 to disable it. Recovery cancels queued mail for that incident. The email omits scan paths, so use Activity to identify the affected path.
 
 ### Enable and verify containment
 
@@ -282,6 +286,16 @@ Create briefly stops Watchdog so it can back up a consistent SQLite database. Li
 
 To restore onto a fresh host, first install and start Watchdog in the same installation mode. Copy the backup directory over a trusted channel and keep it private and owned by the account running restore. Restore verifies the backup before stopping the services, backs up the destination, and restores the configuration, database, token, and recorded baseline files. It uses the destination's installed application and leaves its local containment latch in place. If the restored dashboard fails its authenticated health check, the command attempts to recover the destination's prior state. Review scan paths, the integrity baseline, and any separately stored SMTP credential on the destination.
 
+For off-host storage, install `age` and export a sealed backup to a native age X25519 public recipient. Generate and store the corresponding private identity separately. The export writes an encrypted archive and refuses to overwrite an existing destination. The machine creating the export needs only the public recipient.
+
+```sh
+python3 -B -m watchdog backups --desktop export /path/to/backup-directory watchdog.age --recipient age1...
+python3 -B -m watchdog backups --desktop verify watchdog.age --identity /private/age-identity
+python3 -B -m watchdog backups --desktop restore watchdog.age --identity /private/age-identity
+```
+
+Omit `--desktop` and run as root for a system-wide backup. Verification and restore use private local temporary storage to decrypt the archive, check its layout, and verify its manifest and SQLite database. Restore requires the identity and the encrypted archive. Neither command reinstalls the application from the archive.
+
 ### Coverage limits
 
 This is a host-side detection and containment layer. It covers the host network namespace and the listed signals. Full-system hangs, a compromised kernel, and a sufficiently privileged attacker can defeat host-local enforcement. A separate switch, gateway, or management controller is required for containment when the host itself cannot execute. Payload inspection, malware scanning, and operating-system patch management are outside the implemented coverage.
@@ -321,6 +335,7 @@ bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img desktop-upgrade
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img system-upgrade
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img backup-restore
+bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img system-backup-restore
 ```
 
 Each run creates a disposable disk overlay and verifies that FreshClam is enabled and downloads signatures. The Firefox test acknowledges an EICAR alert in **Open findings**, runs a clean scan after the sample is removed, checks retained coverage and timing for both results, and resolves the original finding. The upgrade modes install the pre-review commit `ae1fe37`, upgrade, use the operator rollback command and verify its state backup and dashboard health check, then reinstall the latest version to confirm the review and coverage history survived. The system-wide mode also checks per-path coverage under home-directory restrictions, reports scan limits and unreadable files, and exercises stale signature recovery using the disposable guest clock.
@@ -330,6 +345,8 @@ The runner uses a loopback-only SSH tunnel for dashboard access and discards the
 GitHub Actions runs the EICAR smoke test on pull requests and pushes to `main` that touch the installers, antivirus integration, or smoke test. The workflow also supports manual runs from the Actions tab.
 
 The backup-restore scenario creates a real backup on one VM and verifies it on a separately installed VM with a different machine ID. It checks that configuration, dashboard access, acknowledged EICAR evidence, and timed antivirus history survive the restore.
+
+The system-backup-restore scenario requires `age-keygen` on the host. It verifies EICAR detection through ClamD, deliberately forces ClamScan fallback, transfers an encrypted backup to a separate system-wide installation, and checks that the restored dashboard and scan history match the donor. The temporary private identity is supplied only to the destination VM.
 
 ### Benchmark multi-path antivirus scans
 
