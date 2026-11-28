@@ -97,6 +97,7 @@ class Console(socketserver.ThreadingMixIn, HTTPServer):
     def run_assessment(self, occurrence=None):
         now = time.time()
         model = self.monitor.settings["ollama_model"]
+        prompt_mode = self.monitor.settings.get("ollama_prompt_mode", "full")
         trigger = "scheduled" if occurrence else "manual"
         event_label = "Scheduled" if occurrence else "Active"
         try:
@@ -114,9 +115,11 @@ class Console(socketserver.ThreadingMixIn, HTTPServer):
                 f'{len(result["deviations"])} baseline deviations and '
                 f'{result["block_candidates"]} temporary block candidates in the latest check.'
             )
+            if prompt_mode == "compact":
+                result["summary"] = f'{analysis.vulnerability_overview(result)} {result["summary"]}'
             if model and not self.monitor.demo:
                 try:
-                    result["summary"] = analysis.local_review(model, result)
+                    result["summary"] = analysis.local_review(model, result, prompt_mode=prompt_mode)
                     result["model"] = "Local model + statistical baseline"
                 except (OSError, ValueError, KeyError, TypeError, AttributeError, http.client.HTTPException):
                     result["model"] = "Statistical baseline · local model unavailable"

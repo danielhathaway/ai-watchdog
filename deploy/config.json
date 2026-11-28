@@ -12,6 +12,7 @@
   "trusted_ca_sha256": [],
   "blocked_ca_sha256": [],
   "ollama_model": "",
+  "ollama_prompt_mode": "full",
   "retention_days": 30,
   "email_alerts": null,
   "antivirus_paths": [],

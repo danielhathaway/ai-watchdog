@@ -50,6 +50,29 @@ class RecurringAndEmailTests(unittest.TestCase):
             titles = {row[0] for row in db.execute("SELECT title FROM events WHERE kind='assessment'")}
             self.assertEqual({"Active AI check completed", "Scheduled AI check completed"}, titles)
 
+    def test_compact_assessment_keeps_counts_first_when_model_fails(self):
+        console = Console.__new__(Console)
+        console.assessment_lock = threading.Lock()
+        console.monitor = SimpleNamespace(
+            settings={"ollama_model": "test:local", "ollama_prompt_mode": "compact"},
+            database=self.database, lock=threading.Lock(), demo=False,
+            scan=lambda *, active: {"deviations": [], "block_candidates": 0},
+        )
+        with store.connect(self.database) as db:
+            store.property_set(db, "vulnerability_summary", {
+                "status": "recorded", "unresolved": 12, "known_exploited": 3,
+            })
+        with patch("watchdog.server.analysis.local_review", side_effect=ValueError):
+            console.run_assessment()
+        with store.connect(self.database) as db:
+            assessment = store.property_get(db, "assessment")
+        self.assertEqual("Statistical baseline · local model unavailable", assessment["model"])
+        self.assertEqual(
+            "12 unresolved vulnerability findings, including 3 known-exploited findings. "
+            "0 baseline deviations and 0 temporary block candidates in the latest check.",
+            assessment["summary"],
+        )
+
     def test_edit_during_run_wins_over_previous_occurrence(self):
         with store.connect(self.database) as db:
             earlier = schedule.save(db, 5, 100)

@@ -24,6 +24,7 @@ DEFAULTS = {
     "integrity_paths": ["/etc/passwd", "/etc/group", "/etc/ld.so.preload"],
     "isolate_on_integrity": [],
     "ollama_model": "",
+    "ollama_prompt_mode": "full",
     "retention_days": 30,
     "email_alerts": None,
     "health_check_minutes": 5,
@@ -129,6 +130,8 @@ def configuration(path=CONFIG):
     model = settings["ollama_model"]
     if not isinstance(model, str) or (model and not re.fullmatch(r"[\w./:-]{1,100}", model, re.ASCII)):
         raise ValueError("Invalid ollama_model")
+    if settings["ollama_prompt_mode"] not in ("full", "compact"):
+        raise ValueError("ollama_prompt_mode must be full or compact")
     from .notifications import configuration as email_configuration
 
     settings["email_alerts"] = email_configuration(settings["email_alerts"], path.parent.absolute())
