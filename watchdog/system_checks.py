@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import backup_health, clamd_backend, multicast, reviews, store, vulnerabilities, wsdd_policy
+from . import backup_health, certificates, clamd_backend, multicast, reviews, store, vulnerabilities, wsdd_policy
 from .common import BOOT_ID, execute, uptime, write_json
 from .process_traffic import SS
 from .responder import heartbeat
@@ -400,9 +400,25 @@ def firewall_check():
     return result("firewall", name, "warn", "No default-drop input policy covers both IP families. Review firewall rules.")
 
 
+def certificate_check(settings):
+    audit = certificates.audit(settings.get("trusted_ca_sha256", ()), settings.get("blocked_ca_sha256", ()))
+    detail = f'{audit["anchors"]} unique certificates across the system PEM bundle and hashed directory.'
+    if audit["findings"]:
+        detail += f' {len(audit["findings"])} certificates need review.'
+        detail += " " + ", ".join(
+            f'{row["sha256"][:16]} ({", ".join(row["issues"])})' for row in audit["findings"][:3]
+        ) + "."
+    if audit["package_errors"]:
+        detail += f' {len(audit["package_errors"])} CA package files differ from readable package metadata.'
+    if audit["coverage_errors"] or not audit["distribution_available"]:
+        detail += " Trust-store coverage is incomplete."
+    return {**result("certificates", "System certificate authorities", audit["status"], detail),
+            "certificate_findings": audit["findings"][:25], "certificate_finding_count": len(audit["findings"])}
+
+
 def hardening(settings):
     return [port_check(settings["allowed_listeners"], settings["allowed_listener_rules"]), ssh_check(), firewall_check(),
-            *(kernel_check(key, minimum) for key, minimum in KERNEL_SETTINGS.items())]
+            *(kernel_check(key, minimum) for key, minimum in KERNEL_SETTINGS.items()), certificate_check(settings)]
 
 
 def antivirus_readiness(now):
@@ -729,6 +745,8 @@ def run(monitor):
                     row["id"] == "ports" and row.get("inventory_version") != LISTENER_INVENTORY_VERSION
                     for row in previous.get("checks", [])
                 )
+                if group == "hardening" and not any(row["id"] == "certificates" for row in previous.get("checks", [])):
+                    outdated = True
                 if not outdated and previous.get("boot_id") == BOOT_ID and 0 <= elapsed < previous["interval_minutes"] * 60:
                     continue
                 try:

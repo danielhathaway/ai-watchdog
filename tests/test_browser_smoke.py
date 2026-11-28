@@ -33,6 +33,13 @@ class BrowserSmoke(unittest.TestCase):
                         db.execute("INSERT INTO coverage_email VALUES (?, ?)", ("/synthetic", queued.lastrowid))
                         store.property_set(db, "email_delivery", {"failures": 1, "next_at": now + 60})
                         store.property_set(db, "coverage_email_delivery", {"last_accepted_at": now - 60})
+                        store.property_set(db, "system_checks", {"hardening": {"at": now, "checks": [{
+                            "id": "certificates", "name": "System certificate authorities", "status": "fail",
+                            "detail": "One certificate needs review.", "certificate_finding_count": 1,
+                            "certificate_findings": [
+                                {"subject": "CN=Test CA", "sha256": "a" * 64, "issues": ["unapproved-fingerprint"]},
+                            ],
+                        }]}})
                         store.property_set(db, "backup_health", {"upload": {"status": "overdue", "deadline": now - 60},
                                                                  "verifier": {"status": "failed", "failure_at": now - 30,
                                                                               "verifier": "verifier-test", "reported_at": now - 1300,
@@ -158,6 +165,10 @@ class BrowserSmoke(unittest.TestCase):
                  "label => document.querySelector('#vulnerability-status').innerText.includes(label))")
         wait_for("document.querySelector('#health-check-time').textContent.includes('Every 5 min') && "
                  "document.querySelector('#hardening-check-time').textContent.includes('Every 60 min')")
+        click(".certificate-inventory summary")
+        wait_for("document.querySelector('.certificate-inventory').open && "
+                 "document.querySelector('.certificate-inventory').textContent.includes('CN=Test CA') && "
+                 "document.querySelector('.certificate-inventory').textContent.includes('unapproved fingerprint')")
         click("[data-page='settings']")
         wait_for("document.querySelector('#coverage-email-status').innerText.includes('Retrying') && "
                  "document.querySelector('#coverage-email-status').innerText.includes('Next retry') && "

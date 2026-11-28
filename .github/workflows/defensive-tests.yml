@@ -1,0 +1,57 @@
+name: Defensive tests
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  defensive:
+    name: Watchdog defensive tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age nftables qemu-system-x86 qemu-utils ovmf xorriso ubuntu-keyring
+          if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Run all Python tests serially
+        env:
+          WATCHDOG_BROWSER_SMOKE: "1"
+        run: |
+          export WATCHDOG_GECKODRIVER="${GECKOWEBDRIVER:?}/geckodriver"
+          /usr/bin/time -f 'Serial suite peak RSS: %M KiB' python3 -B - <<'PY'
+          import unittest
+
+          suite = unittest.defaultTestLoader.discover("tests")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if result.skipped:
+              print("Required tests were skipped:", result.skipped)
+          raise SystemExit(not result.wasSuccessful() or bool(result.skipped) or result.testsRun == 0)
+          PY
+
+      - name: Download and verify the Ubuntu cloud image
+        working-directory: ${{ runner.temp }}
+        run: |
+          base=https://cloud-images.ubuntu.com/releases/noble/release
+          for file in SHA256SUMS SHA256SUMS.gpg ubuntu-24.04-server-cloudimg-amd64.img; do
+            curl --fail --silent --show-error --location --retry 2 --max-time 300 --output "$file" "$base/$file"
+          done
+          gpgv --keyring /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg SHA256SUMS.gpg SHA256SUMS
+          awk '$2 ~ /(^|\*)ubuntu-24\.04-server-cloudimg-amd64\.img$/' SHA256SUMS | sha256sum --check -
+
+      - name: Run defensive scenarios in one disposable VM
+        run: bash tests/smoke/eicar_vm.sh "$RUNNER_TEMP/ubuntu-24.04-server-cloudimg-amd64.img" defensive

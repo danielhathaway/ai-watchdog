@@ -108,6 +108,7 @@ The **Sensors** page shows the latest Watchdog health and host hardening results
 | --- | --- |
 | Watchdog health | Every 5 minutes. Checks the heartbeat, independent supervisor, sensor status, private state permissions, and Watchdog files against a trusted baseline. |
 | Host hardening | Every 60 minutes. Inventories TCP and UDP listeners on non-loopback addresses, reviews effective default OpenSSH authentication settings, checks visible nftables input policy, and reads kernel settings for ASLR, ptrace restrictions, and link protections. |
+| System certificate authorities | Included in Host hardening. Audits the operating system's OpenSSL trust bundle and hashed directory. |
 
 Override the cadence with `health_check_minutes` and `hardening_check_minutes` in the active configuration. Use `allowed_listeners` to list expected non-loopback ports, for example `["tcp/22", "udp/5353"]` if you intend to expose those services. The default empty allowlist surfaces every non-loopback listener for review. A listening socket can still be blocked by a firewall. SSH connection-specific `Match` rules and firewall rules outside the monitor's permissions require separate review.
 
@@ -140,6 +141,19 @@ python3 -m watchdog baseline --directory .watchdog
 ```
 
 The system installation records a root-owned Watchdog baseline with the existing `sudo python3 -B -m watchdog baseline` command. The baseline covers application code, dashboard assets, active configuration, service unit files and their local overrides, and installed UDP probe files when present. After an intentional update, review the files and use `sudo python3 -B -m watchdog baseline --watchdog-only` to refresh just the application baseline on system installations. The observe-only account owns its baseline, so a compromise of that account can affect what the checks report. Host-local checks also depend on the integrity of the running kernel.
+
+### Audit the system CA trust store
+
+Open **Sensors → Host hardening → System certificate authorities** to review the latest audit. Watchdog compares SHA-256 certificate fingerprints from Ubuntu and Debian's system PEM bundle and hashed OpenSSL directory with certificates from the installed `ca-certificates` package and your approved local fingerprints. It reports unapproved, blocked, locally disabled, malformed, or out-of-date trust entries, plus weak keys and applicable weak signatures. The audit also reports when the distribution reference or part of the trust store cannot be verified.
+
+Run a read-only audit and print the full findings, including fingerprints and source paths:
+
+```sh
+python3 -B -m watchdog --config /etc/ai-watchdog/config.json certificates
+python3 -B -m watchdog --config .watchdog/config.json certificates
+```
+
+Put independently verified local roots in `trusted_ca_sha256` and fingerprints you want flagged whenever present in `blocked_ca_sha256`. Each entry is 64 hexadecimal characters. A blocked fingerprint takes precedence over local approval. The command returns 0 for a pass, 1 for findings, and 2 for an inconclusive audit. Browser, Java, container and application-specific trust stores have separate policies. Watchdog reads the store and leaves certificate installation and removal to the operator.
 
 ### Optional ClamAV antivirus
 
@@ -377,6 +391,8 @@ This is a host-side detection and containment layer. It covers the host network 
 
 From the checkout on Linux:
 
+`Watchdog defensive tests` runs the Python suite serially on every pull request and merge-queue entry, fails on skips, and then boots one disposable Ubuntu guest. The guest verifies systemd timer activation, stale advisory alerts and recovery with local feed fixtures, a real SSH/sudo/service-start sequence, and the detection and removal of a guest-only test CA. To enforce the gate, a repository administrator must require **Watchdog defensive tests** on `main` in a branch protection rule or ruleset. [GitHub required status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging)
+
 ```sh
 python3 -m unittest discover -s tests -v
 ```
@@ -409,6 +425,7 @@ bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img des
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img system-upgrade
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img backup-restore
 bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img system-backup-restore
+bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img defensive
 ```
 
 Each run creates a disposable disk overlay and verifies that FreshClam is enabled and downloads signatures. The Firefox test acknowledges an EICAR alert in **Open findings**, runs a clean scan after the sample is removed, checks retained coverage and timing for both results, and resolves the original finding. The upgrade modes install the pre-review commit `ae1fe37`, upgrade, use the operator rollback command and verify its state backup and dashboard health check, then reinstall the latest version to confirm the review and coverage history survived. The system-wide mode also checks per-path coverage under home-directory restrictions, reports scan limits and unreadable files, and exercises stale signature recovery using the disposable guest clock.

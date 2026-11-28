@@ -2,7 +2,7 @@
 # Boot a fresh overlay from an Ubuntu 24.04 amd64 cloud image.
 set -euo pipefail
 if [[ $# -lt 1 || $# -gt 3 || ! -r $1 ]]; then
-    echo "Usage: bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img [desktop|desktop-upgrade|system-upgrade|backup-restore|system-backup-restore]" >&2
+    echo "Usage: bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img [desktop|desktop-upgrade|system-upgrade|backup-restore|system-backup-restore|defensive]" >&2
     exit 2
 fi
 mode=${2:-desktop}
@@ -54,7 +54,7 @@ PY
     exit
 fi
 case "$mode" in
-    desktop|desktop-upgrade|system-upgrade) ;;
+    desktop|desktop-upgrade|system-upgrade|defensive) ;;
     backup-source|backup-destination|system-backup-source|system-backup-destination|system-backup-primary)
         : "${3:?Missing private backup transfer path}" ;;
     *) echo "Unknown mode: $mode" >&2; exit 2 ;;
@@ -67,7 +67,7 @@ variables=${WATCHDOG_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 for command in python3 qemu-img qemu-system-x86_64 ssh ssh-keygen timeout xorriso; do
     command -v "$command" >/dev/null || { echo "Missing $command" >&2; exit 1; }
 done
-if [[ $mode != *backup-* ]]; then
+if [[ $mode != *backup-* && $mode != defensive ]]; then
     command -v "${WATCHDOG_GECKODRIVER:-geckodriver}" >/dev/null || { echo "Missing GeckoDriver." >&2; exit 1; }
 fi
 for file in "$firmware" "$variables"; do
@@ -86,7 +86,7 @@ cleanup() {
     fi
     if (( status != 0 )); then
         if [[ -s $work/guest.log ]]; then
-            grep -aE 'WATCHDOG_EICAR_|WATCHDOG_BACKUP_JOB_ERROR|Rollback failed:' "$work/guest.log" >&2 || true
+            grep -aE 'WATCHDOG_EICAR_|WATCHDOG_DEFENSIVE_|WATCHDOG_BACKUP_JOB_ERROR|Rollback failed:' "$work/guest.log" >&2 || true
         fi
         for log in guest.log qemu.log geckodriver.log; do
             if [[ -s $work/$log ]]; then
@@ -115,7 +115,9 @@ ssh-keygen -q -t ed25519 -N '' -C watchdog-smoke-vm -f "$work/vm-key"
 sources=(LICENSE deploy/install-user.sh deploy/install.sh deploy/install-clamav.sh deploy/config.json
          deploy/ai-watchdog.service deploy/ai-watchdog-response.service watchdog)
 jobs=(deploy/ai-watchdog-backup-{upload,drill,verifier@}.{service,timer})
-tar -C "$repo" --exclude=__pycache__ -czf "$work/source.tgz" "${sources[@]}" "${jobs[@]}"
+scheduled=(deploy/ai-watchdog-vulnerability-refresh.{service,timer}
+           deploy/ai-watchdog-userspace.{service,timer} deploy/ai-watchdog-runtime-processes.service)
+tar -C "$repo" --exclude=__pycache__ -czf "$work/source.tgz" "${sources[@]}" "${jobs[@]}" "${scheduled[@]}"
 if [[ $mode == *-upgrade ]]; then
     # Last release before alert-review metadata was added.
     git -C "$repo" -c tar.umask=0022 archive --format=tar.gz ae1fe37ad4a4b3f85e5a95c5f32d091e02be624c "${sources[@]}" >"$work/legacy.tgz"
@@ -135,7 +137,15 @@ fi
 if [[ $mode == system-backup-destination || $mode == system-backup-primary ]]; then
     cp -- "$(dirname -- "$3")/report-key" "$work/report-key"
 fi
-python3 - "$work" "$smoke/eicar_guest.py" "$dashboard_port" "$mode" <<'PY'
+guest_script=$smoke/eicar_guest.py
+marker=WATCHDOG_EICAR_GUEST
+memory=2560
+if [[ $mode == defensive ]]; then
+    guest_script=$smoke/defensive_guest.py
+    marker=WATCHDOG_DEFENSIVE_GUEST
+    memory=1536
+fi
+python3 - "$work" "$guest_script" "$dashboard_port" "$mode" <<'PY'
 import base64
 from pathlib import Path
 import sys
@@ -168,16 +178,17 @@ for source, target, permissions in files:
     config.extend((f"  - path: {target}", f"    permissions: '{permissions}'", "    encoding: b64", f"    content: {payload}"))
 config.extend(("runcmd:", f"  - [/usr/local/sbin/watchdog-eicar-check, '{port}', '{mode}']"))
 (work / "user-data").write_text("\n".join(config) + "\n")
-(work / "meta-data").write_text("instance-id: watchdog-eicar-smoke\nlocal-hostname: watchdog-eicar\n")
+hostname = "watchdog-defensive" if mode == "defensive" else "watchdog-eicar"
+(work / "meta-data").write_text(f"instance-id: {hostname}-smoke\nlocal-hostname: {hostname}\n")
 PY
 xorriso -as mkisofs -quiet -output "$work/seed.iso" -volid CIDATA -joliet -rock \
     "$work/user-data" "$work/meta-data"
 qemu-img create -q -f qcow2 -F qcow2 -b "$image" "$work/guest.qcow2" 12G
 cp -- "$variables" "$work/vars.fd"
 
-echo "Booting a fresh Ubuntu VM for the Watchdog EICAR check ($mode)."
+echo "Booting a fresh Ubuntu VM for the Watchdog check ($mode)."
 timeout --kill-after=10s 1320 qemu-system-x86_64 -machine q35 -accel kvm -accel tcg \
-    -cpu max -m 2560 -smp 2 -display none -monitor none -serial "file:$work/guest.log" -no-reboot \
+    -cpu max -m "$memory" -smp 2 -display none -monitor none -serial "file:$work/guest.log" -no-reboot \
     -drive "if=pflash,format=raw,readonly=on,file=$firmware" \
     -drive "if=pflash,format=raw,file=$work/vars.fd" \
     -drive "if=virtio,format=qcow2,file=$work/guest.qcow2" \
@@ -187,14 +198,19 @@ timeout --kill-after=10s 1320 qemu-system-x86_64 -machine q35 -accel kvm -accel 
 vm=$!
 
 deadline=$((SECONDS + 1140))
-until grep -aq WATCHDOG_EICAR_GUEST_PASS "$work/guest.log" 2>/dev/null; do
-    if grep -aq WATCHDOG_EICAR_GUEST_FAIL "$work/guest.log" 2>/dev/null ||
+until grep -aq "${marker}_PASS" "$work/guest.log" 2>/dev/null; do
+    if grep -aq "${marker}_FAIL" "$work/guest.log" 2>/dev/null ||
         ! kill -0 "$vm" 2>/dev/null || (( SECONDS >= deadline )); then
-        echo "Guest failed before reporting the EICAR detection." >&2
+        echo "Guest failed before reporting success ($mode)." >&2
         exit 1
     fi
     sleep 2
 done
+if [[ $mode == defensive ]]; then
+    grep -a 'WATCHDOG_DEFENSIVE_' "$work/guest.log"
+    echo WATCHDOG_DEFENSIVE_VM_PASS
+    exit
+fi
 grep -a 'WATCHDOG_EICAR_' "$work/guest.log"
 if [[ $mode == *backup-source ]]; then
     fetch=(cat /var/tmp/watchdog-backup-export.tgz)

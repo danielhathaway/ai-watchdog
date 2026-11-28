@@ -50,6 +50,7 @@ def main():
     demo = actions.add_parser("demo", help="Start a dashboard using synthetic data")
     demo.add_argument("--port", type=int, default=8765)
     actions.add_parser("serve", help="Start the unprivileged monitor and authenticated dashboard")
+    actions.add_parser("certificates", help="Audit the effective system CA trust store")
     for name, help_text in (
         ("observe", "Start the unprivileged user monitor with enforcement disabled"),
         ("observe-supervisor", "Start the unprivileged heartbeat supervisor"),
@@ -134,6 +135,13 @@ def main():
             state = Path(directory)
             serve({"port": args.port, "interval": 10, "ollama_model": ""}, state, state, demo=True)
         return
+    if args.command == "certificates":
+        from . import certificates
+
+        settings = configuration(args.config)
+        report = certificates.audit(settings["trusted_ca_sha256"], settings["blocked_ca_sha256"])
+        print(json.dumps(report, indent=2))
+        raise SystemExit({"pass": 0, "warn": 1, "fail": 1, "unknown": 2}[report["status"]])
     if args.command == "vulnerabilities":
         from . import store, userspace, vulnerabilities
 

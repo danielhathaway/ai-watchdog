@@ -63,6 +63,7 @@ class SSHActivityTests(unittest.TestCase):
     def test_correlation_survives_separate_scans_and_replays_without_sensitive_fields(self):
         args = self.feed(login(), AT + 1)
         self.assertIn("--since", args)
+        self.assertNotIn("--system", args)
         self.assertEqual([], self.events())
         args = self.feed(sudo(), AT + 3)
         self.assertEqual("cursor-2", args[args.index("--after-cursor") + 1])
@@ -159,6 +160,24 @@ class SSHActivityTests(unittest.TestCase):
             row["_AUDIT_SESSION"] = "4294967295"
             row["_SYSTEMD_SESSION"] = "c12"
         self.feed(rows)
+        self.assertEqual(1, len(self.events()))
+
+    def test_logind_binds_pre_pam_ssh_to_noninteractive_sudo(self):
+        accepted, opened = login()
+        opened.pop("_AUDIT_SESSION")
+        opened.pop("_AUDIT_LOGINUID")
+        approval, root = sudo()
+        approval["MESSAGE"] = approval["MESSAGE"].replace("TTY=pts/9 ; ", "")
+        for record in (approval, root):
+            record["_SYSTEMD_SESSION"] = "20"
+        binding = entry(
+            6, "New session 20 of user deploy.", activity.LOGIND[0], at=AT + 1.5, pid="321",
+            MESSAGE_ID=activity.SESSION_STARTED, _SYSTEMD_UNIT="systemd-logind.service", LEADER="12",
+            USER_ID="deploy", SESSION_ID="20",
+        )
+        self.feed([accepted, opened, {**binding, "LEADER": "15"}, approval, root, start()])
+        self.assertEqual([], self.events())
+        self.feed([{**binding, "__CURSOR": "cursor-7"}])
         self.assertEqual(1, len(self.events()))
 
     def test_scan_limit_marks_coverage_degraded_and_skips_partial_batch(self):

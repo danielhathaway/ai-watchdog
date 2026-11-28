@@ -37,6 +37,8 @@ DEFAULTS = {
     "allowed_listeners": [],
     "allowed_listener_rules": [],
     "ssh_activity_allowed_targets": [],
+    "trusted_ca_sha256": [],
+    "blocked_ca_sha256": [],
 }
 
 
@@ -111,6 +113,12 @@ def configuration(path=CONFIG):
             or any(not (unit_name(target) or persistence_path(target)) for target in targets)):
         raise ValueError("Invalid ssh_activity_allowed_targets entry")
     settings["ssh_activity_allowed_targets"] = sorted(set(targets))
+    for key in ("trusted_ca_sha256", "blocked_ca_sha256"):
+        pins = settings[key]
+        if (not isinstance(pins, list) or len(pins) > 512
+                or any(not isinstance(pin, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", pin) for pin in pins)):
+            raise ValueError(f"Invalid {key} entry")
+        settings[key] = sorted({pin.lower() for pin in pins})
     settings["protected_networks"] = [
         ipaddress.ip_network(network) for network in settings["protected_networks"]
     ]

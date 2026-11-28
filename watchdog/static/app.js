@@ -575,6 +575,7 @@ function renderSystemChecks() {
     const report = snapshot.system_checks?.[group];
     const target = get(`${group}-checks`);
     const listenersOpen = target.querySelector(".listener-inventory")?.open ?? false;
+    const certificatesOpen = target.querySelector(".certificate-inventory")?.open ?? false;
     const cadence = report ? `Every ${number.format(report.interval_minutes)} min · ` : "";
     text(`${group}-check-time`, cadence + (report?.at ? `Last run ${fullDate(report.at)}` : "No check recorded"));
     const rows = (report?.checks ?? []).map((entry) => {
@@ -612,6 +613,19 @@ function renderSystemChecks() {
           list.append(item);
         }
         inventory.append(element("summary", `Listener owners (${entry.listeners.length})`), list);
+        detail.append(inventory);
+      }
+      if (entry.certificate_findings?.length) {
+        const inventory = element("details", null, "certificate-inventory");
+        inventory.open = certificatesOpen;
+        const list = element("ul");
+        for (const certificate of entry.certificate_findings) {
+          const row = element("li", certificate.subject || "Unknown subject");
+          row.append(element("span", `SHA-256 ${certificate.sha256}`),
+            element("span", certificate.issues.map(issue => issue.replaceAll("-", " ")).join(", ")));
+          list.append(row);
+        }
+        inventory.append(element("summary", `Certificates to review (${entry.certificate_finding_count})`), list);
         detail.append(inventory);
       }
       row.append(element("dt", entry.name), detail);

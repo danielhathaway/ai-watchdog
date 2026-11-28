@@ -165,6 +165,21 @@ class VulnerabilitiesTests(unittest.TestCase):
                              [tuple(row) for row in db.execute(
                                  "SELECT title, subject FROM events WHERE kind='vulnerability-feed' ORDER BY id")])
 
+    def test_userspace_summary_does_not_override_feed_freshness(self):
+        now = time.time()
+        with store.connect(self.db) as db:
+            store.property_set(db, "vulnerability_summary", {
+                "report_at": now, "sources": {"kev": {"status": "failed", "online_at": now - vuln.STALE_AFTER}},
+            })
+            store.property_set(db, vuln.userspace.SUMMARY_PROPERTY, {
+                "at": now, "boot_id": vuln.BOOT_ID, "report_at": now, "coverage": {},
+                "vulnerabilities": {"sources": {"kev": {"status": "ready", "online_at": now}}},
+            })
+            result = vuln.summary(db, now)
+        self.assertEqual("recorded", result["userspace"]["status"])
+        self.assertEqual("stale", result["sources"]["kev"]["freshness"])
+        self.assertEqual("failed", result["sources"]["kev"]["status"])
+
     def test_kernel_verification_distinguishes_installed_and_running_builds(self):
         archive(self.archive, [affected("linux", fixed="6.8.0-50.51")])
         release = "6.8.0-50-generic"

@@ -449,9 +449,10 @@ udp UNCONN 0 0 *:10001 *:* users:(("wsdd",pid=2,fd=8)) ino:51 sk:ba cgroup:/user
         settings = configuration(self.directory / "missing.json")
         warn = checks.result("ports", "Listeners", "warn", "tcp/22")
         warn["inventory_version"] = checks.LISTENER_INVENTORY_VERSION
+        trust = checks.result("certificates", "System certificate authorities", "pass", "Known roots")
         checks.save(self.database, "health", 100, [])
-        checks.save(self.database, "hardening", 100, [warn])
-        checks.save(self.database, "hardening", 120, [warn])
+        checks.save(self.database, "hardening", 100, [warn, trust])
+        checks.save(self.database, "hardening", 120, [warn, trust])
         monitor = SimpleNamespace(database=self.database, settings=settings,
                                   stop=Mock(), ready=Mock(), observe_directory=None)
         monitor.stop.wait.side_effect = [False, True]

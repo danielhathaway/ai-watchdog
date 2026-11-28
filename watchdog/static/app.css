@@ -85,9 +85,10 @@ dl div{display:flex;justify-content:space-between;align-items:center;padding:12p
 .check-results dd span{display:block;margin-top:4px;color:var(--muted)}
 #antivirus-panel dd,#backup-health-panel dd,#vulnerability-status dd{text-transform:none}
 #antivirus-panel .scan-paths{white-space:pre-line}
-.listener-inventory{margin-top:8px}
-.listener-inventory summary{cursor:pointer}
-.listener-inventory ul{padding-inline-start:18px;text-align:left}
+.listener-inventory,.certificate-inventory{margin-top:8px}
+.listener-inventory summary,.certificate-inventory summary{cursor:pointer}
+.listener-inventory ul,.certificate-inventory ul{padding-inline-start:18px;text-align:left}
+.certificate-inventory li{overflow-wrap:anywhere}
 dd{margin:0;text-transform:capitalize}
 .unlock{max-width:460px;padding:23px}
 .unlock label{display:block;margin-top:20px;margin-bottom:5px;font-size:.9rem}

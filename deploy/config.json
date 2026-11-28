@@ -9,6 +9,8 @@
   "integrity_paths": ["/etc/passwd", "/etc/group", "/etc/ld.so.preload"],
   "isolate_on_integrity": [],
   "ssh_activity_allowed_targets": [],
+  "trusted_ca_sha256": [],
+  "blocked_ca_sha256": [],
   "ollama_model": "",
   "retention_days": 30,
   "email_alerts": null,

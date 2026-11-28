@@ -516,6 +516,7 @@ def check_feed_health(database, expected, now):
 
 def summary(db, now=None):
     saved = store.property_get(db, "vulnerability_summary", {"status": "not-checked"})
+    sources = saved.get("sources", {})
     health = store.property_get(db, "vulnerability_feed_health", {})
     now = time.time() if now is None else now
     runtime = store.property_get(db, userspace.SUMMARY_PROPERTY, {})
@@ -525,7 +526,6 @@ def summary(db, now=None):
             saved = runtime["vulnerabilities"]
         saved = {**saved, "userspace": {"status": "recorded" if current else "awaiting-recheck",
                                         "at": runtime["at"], **runtime["coverage"]}}
-    sources = saved.get("sources", {})
     since = {name: source.get("attempted_at", source.get("checked_at", now))
              for name, source in sources.items() if name == "kev" or name.startswith("Ubuntu:")}
     since.update(health.get("since", {}))

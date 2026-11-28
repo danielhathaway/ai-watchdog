@@ -27,17 +27,22 @@ SYSTEM_UNITS = Path("/etc/systemd/system")
 SSH = ("/usr/sbin/sshd", "/usr/lib/openssh/sshd-session", "/usr/lib/openssh/sshd-auth")
 SUDO = ("/usr/bin/sudo", "/usr/bin/sudo.ws", "/usr/bin/sudo-rs", "/usr/lib/cargo/bin/sudo")
 SYSTEMD = ("/usr/lib/systemd/systemd", "/lib/systemd/systemd")
+LOGIND = ("/usr/lib/systemd/systemd-logind", "/lib/systemd/systemd-logind")
 UNIT_STARTED = "39f53479d3a045ac8e11786248231fbf"
+SESSION_STARTED = "8d45620c1a4348dbb17410da57c60c66"
 ACCOUNT = r"[A-Za-z0-9_.@-]{1,64}"
 UNIT = re.compile(r"[A-Za-z0-9_.@:-]{1,180}\.(?:service|socket|timer|path)")
 ACCEPTED = re.compile(rf"^Accepted [\w/@.+-]+ for ({ACCOUNT}) from ([\da-fA-F:.]+) port \d+ ssh2(?:[: ]|$)")
 SSH_SESSION = re.compile(rf"^pam_unix\(sshd:session\): session opened for user ({ACCOUNT})(?:\(uid=\d+\))? by ")
 ROOT_SESSION = re.compile(r"^pam_unix\((?:sudo|sudo-i):session\): session opened for user root(?:\(uid=0\))? by ")
-APPROVAL = re.compile(rf"^\s*({ACCOUNT})\s*:\s*TTY=[^;]+\s*;(?:[^;]+;)*?\s*USER=root\s*;\s*COMMAND=(.+)$")
+APPROVAL = re.compile(
+    rf"^\s*({ACCOUNT})\s*:\s*(?=(?:TTY|PWD|CHROOT|ENV)=)(?:[^;]+;)*?\s*USER=root\s*;\s*COMMAND=(.+)$"
+)
 FIELDS = ("MESSAGE,_BOOT_ID,_PID,_UID,_EXE,_AUDIT_SESSION,_AUDIT_LOGINUID,_SYSTEMD_SESSION,"
-          "_SOURCE_REALTIME_TIMESTAMP,MESSAGE_ID,UNIT")
+          "_SYSTEMD_UNIT,_SOURCE_REALTIME_TIMESTAMP,MESSAGE_ID,UNIT,SESSION_ID,USER_ID,LEADER")
 MATCHES = tuple(arg for exe in (*SSH, *SUDO) for arg in (f"_EXE={exe}", "+")) + (
-    "_PID=1", f"MESSAGE_ID={UNIT_STARTED}",
+    "_PID=1", f"MESSAGE_ID={UNIT_STARTED}", "+", "_SYSTEMD_UNIT=systemd-logind.service",
+    f"MESSAGE_ID={SESSION_STARTED}",
 )
 PERSISTENCE = re.compile(
     r"/etc/(?:cron\.d/[A-Za-z0-9_-]+|sudoers\.d/[A-Za-z0-9_-]+|ssh/sshd_config\.d/[A-Za-z0-9_-]+\.conf)"
@@ -132,6 +137,14 @@ def signal(entry, now):
     if (exe in SYSTEMD and pid == "1" and entry.get("_UID") == "0"
             and entry.get("MESSAGE_ID") == UNIT_STARTED and unit_name(entry.get("UNIT"))):
         return {**base, "kind": "started", "target": entry["UNIT"]}
+    if (exe in LOGIND and entry.get("_UID") == "0" and entry.get("_SYSTEMD_UNIT") == "systemd-logind.service"
+            and entry.get("MESSAGE_ID") == SESSION_STARTED):
+        leader = identifier(entry.get("LEADER"), r"[1-9]\d{0,9}")
+        account = identifier(entry.get("USER_ID"), ACCOUNT)
+        session_id = identifier(entry.get("SESSION_ID"), r"[A-Za-z0-9_-]{1,32}")
+        if leader and account and session_id:
+            return {**base, "pid": leader, "kind": "ssh-open", "account": account,
+                    "session": {"systemd": session_id}}
     if not isinstance(message, str) or len(message) > 2048:
         return None
     base["session"] = session(entry)
@@ -155,7 +168,8 @@ def signal(entry, now):
 
 
 def journal(cursor, now):
-    options = [sensors.JOURNAL, "--system", "-b", "-q", "--no-pager", "-o", "json",
+    # On systems that split journals by UID, sudo records can be in the invoking user's journal.
+    options = [sensors.JOURNAL, "-b", "-q", "--no-pager", "-o", "json",
                f"--output-fields={FIELDS}", "--until", f"@{now:.6f}", "-n", str(MAX_BATCH + 1)]
     try:
         position = ["--after-cursor", cursor] if cursor else ["--since", f"@{max(0, int(now) - 60)}"]
