@@ -610,3 +610,5 @@ For an evidence check, place reviewed rules in the state directory's `vulnerabil
 ```
 
 The evidence check reads existing records. It reports matching indicators, missing rules, and any journal coverage gap. No indicator rules ship enabled. The two [agent skills](skills/) can be installed by copying their directories into an agent's skills directory.
+
+<!-- Disposable PR for verifying the passing defensive status check. -->
