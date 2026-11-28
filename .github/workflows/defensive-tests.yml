@@ -20,6 +20,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Intentionally fail this disposable merge-gate probe
+        run: |
+          sleep 150
+          exit 1
+
       - name: Install test tools
         run: |
           sudo apt-get update
