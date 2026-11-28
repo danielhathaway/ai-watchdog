@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the installed monitor with disposable guest-only fixtures."""
+import hashlib
 import io
 import json
 import os
@@ -7,6 +8,7 @@ import pwd
 import secrets
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -203,12 +205,14 @@ def certificates():
         "-keyout", str(WORK / "ca.key"), "-out", str(certificate), capture_output=True)
     run("update-ca-certificates", capture_output=True)
     code, report = audit()
-    fixture = next(row for row in report["findings"] if row["subject"] == "CN=Watchdog Disposable CA")
-    assert code == 1 and "unapproved-fingerprint" in fixture["issues"]
+    fingerprint = hashlib.sha256(ssl.PEM_cert_to_DER_cert(certificate.read_text())).hexdigest()
+    fixtures = [row for row in report["findings"] if row["sha256"] == fingerprint]
+    assert len(fixtures) == 1, f"Disposable CA {fingerprint} missing from report: {report}"
+    assert code == 1 and "unapproved-fingerprint" in fixtures[0]["issues"], fixtures[0]
     certificate.unlink()
     run("update-ca-certificates", "--fresh", capture_output=True)
     _, recovered = audit()
-    assert all(row["sha256"] != fixture["sha256"] for row in recovered["findings"])
+    assert all(row["sha256"] != fingerprint for row in recovered["findings"])
     mark("CA_AUDIT_PASS")
 
 
