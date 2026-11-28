@@ -1,0 +1,10 @@
+[Unit]
+Description=Send AI Watchdog off-host evidence every 30 seconds
+
+[Timer]
+OnActiveSec=5s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

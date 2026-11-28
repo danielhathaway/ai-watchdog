@@ -1,0 +1,23 @@
+[Unit]
+Description=Send AI Watchdog events and endpoint heartbeat
+ConditionPathExists=/etc/ai-watchdog/off-host-sender.json
+
+[Service]
+Type=oneshot
+User=ai-watchdog
+Group=ai-watchdog
+WorkingDirectory=/opt/ai-watchdog
+ExecStart=/usr/bin/python3 -B -m watchdog off-host send --settings /etc/ai-watchdog/off-host-sender.json
+TimeoutStartSec=30s
+ReadWritePaths=/var/lib/ai-watchdog
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=128M

@@ -385,6 +385,55 @@ The verifier sends authenticated outcome timestamps. The primary rejects tampere
 
 To rotate the age key, generate a new identity on the verifier, replace the uploader's public `recipient`, publish a new archive, and update the verifier's drill identity. Keep the retired identity in recovery storage for as long as any archive encrypted to it is retained. Older immutable archives stay encrypted to their original recipients. To rehearse an older recovery point, run `backups drill --job /path/to/private-job.json --archive ARCHIVE_NAME` with a job file pointing to the retired identity, or download the archive and verify it directly.
 
+### Collect events and heartbeats off-host
+
+Run the collector on a separate host so it can alert when an endpoint or its network goes down. The endpoint sender uses verified HTTPS and a separate credential per endpoint. It forwards high and critical events, including their title, detail, and subject, from local retention. Reports include a heartbeat only while the monitor's local heartbeat is fresh. The collector records receipt time, rejects stale or replayed reports, deduplicates retried events, and writes one high-severity alert per silence incident plus an informational recovery event. Event-only reports leave heartbeat status unchanged.
+
+Install Watchdog on the collector host with `sudo ./deploy/install.sh --without-clamav`. Run the collector on the private network or VPN used by your endpoints. Use a server certificate with a subject alternative name matching the sender URL. The collector accepts reports from explicitly enrolled endpoints. It keeps its state separately in `/var/lib/ai-watchdog-collector` and exposes event history through the local CLI.
+
+Save the collector settings as `/etc/ai-watchdog/off-host-collector.json`:
+
+```json
+{
+  "listen": "192.0.2.10",
+  "port": 9443,
+  "certificate": "collector-chain.pem",
+  "private_key": "collector-key.pem",
+  "endpoints": {"laptop": "laptop-offhost.key"},
+  "silence_seconds": 180,
+  "retention_days": 30
+}
+```
+
+Replace the example address with the collector's private bind address. Generate a distinct key for each endpoint with `openssl rand -hex 32` into a private file and provision its matching copy on the endpoint through your secure credential distribution process. Keep the configuration, key files, and collector TLS private key owned by the service account with mode `0600`. File paths in settings are relative to the settings file unless absolute. Silence starts after the configured interval from enrollment or the most recent fresh heartbeat. Alerts appear in the collector journal and SQLite. To email silence alerts, add an `email_alerts` object using the [SMTP configuration](#email-alerts) with `minimum_severity` set to `high`.
+
+```sh
+sudo systemctl enable --now ai-watchdog-collector.service
+sudo -u ai-watchdog -- /usr/bin/python3 -B -m watchdog off-host status
+```
+
+Run the CLI from the installed application directory `/opt/ai-watchdog` or a checkout. The collector account owns the private database. Use `--limit` to change the number of recent events and alerts shown.
+
+On each system endpoint, save `/etc/ai-watchdog/off-host-sender.json` with mode `0600` and ownership by `ai-watchdog`:
+
+```json
+{
+  "endpoint": "laptop",
+  "url": "https://collector.example.net:9443",
+  "key_file": "laptop-offhost.key",
+  "ca_file": "collector-ca.pem"
+}
+```
+
+Use the same endpoint name and key at both ends. Omit `ca_file` when the collector certificate chains to the system trust store. Enable the timer explicitly after starting the local monitor. Desktop installs use the same sender configuration and a user-owned key under `.watchdog`.
+
+```sh
+sudo systemctl enable --now ai-watchdog-offhost-sender.timer
+systemctl --user enable --now ai-watchdog-observe-offhost-sender.timer
+```
+
+Use the command for your installation type. The sender makes a scheduled attempt every 30 seconds with up to 32 pending events per request. Failed deliveries remain pending while the events are retained locally. Allow enough time for normal monitor and sender delays when choosing a silence threshold, and keep the endpoint and collector clocks synchronized. On the collector, `journalctl -u ai-watchdog-collector.service` shows silence and recovery transitions.
+
 ### Coverage limits
 
 This is a host-side detection and containment layer. It covers the host network namespace and the listed signals. Full-system hangs, a compromised kernel, and a sufficiently privileged attacker can defeat host-local enforcement. A separate switch, gateway, or management controller is required for containment when the host itself cannot execute. Payload inspection, malware scanning, and operating-system patch management are outside the implemented coverage.
@@ -393,7 +442,7 @@ This is a host-side detection and containment layer. It covers the host network 
 
 From the checkout on Linux:
 
-`Watchdog defensive tests` runs the Python suite serially on every pull request and merge-queue entry, fails on skips, and then boots one disposable Ubuntu guest. The guest verifies systemd timer activation, stale advisory alerts and recovery with local feed fixtures, a real SSH/sudo/service-start sequence, and the detection and removal of a guest-only test CA. To enforce the gate, a repository administrator must require **Watchdog defensive tests** on `main` in a branch protection rule or ruleset. [GitHub required status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging)
+`Watchdog defensive tests` runs the Python suite serially on every pull request and merge-queue entry, fails on skips, and then boots one disposable Ubuntu guest. The guest verifies systemd timer activation, stale advisory alerts and recovery with local feed fixtures, a real SSH/sudo/service-start sequence, the detection and removal of a guest-only test CA, and scheduled HTTPS collection with independent silence and recovery alerts. To enforce the gate, a repository administrator must require **Watchdog defensive tests** on `main` in a branch protection rule or ruleset. [GitHub required status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging)
 
 ```sh
 python3 -m unittest discover -s tests -v

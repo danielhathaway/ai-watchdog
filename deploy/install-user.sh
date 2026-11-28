@@ -97,11 +97,30 @@ UNIT
 sed 's/PartOf=ai-watchdog.service/PartOf=ai-watchdog-observe.service/' \
     "$source_dir/deploy/ai-watchdog-userspace.timer" \
     > "$state_dir/ai-watchdog-observe-userspace.timer"
+cat > "$state_dir/ai-watchdog-observe-offhost-sender.service" <<UNIT
+[Unit]
+Description=Send AI Watchdog user events and endpoint heartbeat
+After=ai-watchdog-observe.service
+ConditionPathExists=$state_dir/off-host-sender.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=$source_dir
+ExecStart=/usr/bin/python3 -B -m watchdog --config $state_dir/config.json off-host send --settings $state_dir/off-host-sender.json --directory $state_dir
+TimeoutStartSec=30s
+MemoryMax=128M
+NoNewPrivileges=yes
+UMask=0077
+UNIT
+install -m 0600 "$source_dir/deploy/ai-watchdog-offhost-sender.timer" \
+    "$state_dir/ai-watchdog-observe-offhost-sender.timer"
 systemctl --user link \
     "$state_dir/ai-watchdog-observe-vulnerability-refresh.service" \
     "$state_dir/ai-watchdog-observe-vulnerability-refresh.timer" \
     "$state_dir/ai-watchdog-observe-userspace.service" \
-    "$state_dir/ai-watchdog-observe-userspace.timer"
+    "$state_dir/ai-watchdog-observe-userspace.timer" \
+    "$state_dir/ai-watchdog-observe-offhost-sender.service" \
+    "$state_dir/ai-watchdog-observe-offhost-sender.timer"
 
 systemctl --user enable --now \
     "$state_dir/ai-watchdog-observe.service" \

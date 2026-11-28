@@ -116,7 +116,8 @@ sources=(LICENSE deploy/install-user.sh deploy/install.sh deploy/install-clamav.
          deploy/ai-watchdog.service deploy/ai-watchdog-response.service watchdog)
 jobs=(deploy/ai-watchdog-backup-{upload,drill,verifier@}.{service,timer})
 scheduled=(deploy/ai-watchdog-vulnerability-refresh.{service,timer}
-           deploy/ai-watchdog-userspace.{service,timer} deploy/ai-watchdog-runtime-processes.service)
+           deploy/ai-watchdog-userspace.{service,timer} deploy/ai-watchdog-runtime-processes.service
+           deploy/ai-watchdog-offhost-sender.{service,timer} deploy/ai-watchdog-collector.service)
 tar -C "$repo" --exclude=__pycache__ -czf "$work/source.tgz" "${sources[@]}" "${jobs[@]}" "${scheduled[@]}"
 if [[ $mode == *-upgrade ]]; then
     # Last release before alert-review metadata was added.

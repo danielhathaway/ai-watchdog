@@ -19,6 +19,14 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS event_topic ON events(kind, subject, at);
 CREATE INDEX IF NOT EXISTS event_time ON events(at);
+CREATE INDEX IF NOT EXISTS offhost_events ON events(id) WHERE severity IN ('high','critical');
+CREATE TABLE IF NOT EXISTS offhost_delivery (
+    event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    export_id TEXT NOT NULL DEFAULT (lower(hex(randomblob(16)))),
+    delivered INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS offhost_export_id ON offhost_delivery(export_id);
+CREATE INDEX IF NOT EXISTS offhost_pending ON offhost_delivery(event_id) WHERE delivered=0;
 CREATE TABLE IF NOT EXISTS finding_reviews (
     event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
     paths TEXT, acknowledged_at REAL, resolved_at REAL, evidence_at REAL, evidence_detail TEXT

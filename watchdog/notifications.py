@@ -77,7 +77,8 @@ def send(settings, events):
         f'  {event["severity"].upper()}  {event["title"]}'
         for event in events
     ]
-    message.set_content("\n".join(lines) + "\n\nOpen the local AI Watchdog dashboard for details.\n")
+    hint = settings.get("details_hint", "Open the local AI Watchdog dashboard for details.")
+    message.set_content("\n".join(lines) + "\n\n" + hint + "\n")
 
     password = read_password(settings["password_file"]) if settings["username"] else None
     context = ssl.create_default_context()

@@ -4,7 +4,9 @@ import io
 import json
 import os
 import pwd
+import secrets
 import socket
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -210,6 +212,76 @@ def certificates():
     mark("CA_AUDIT_PASS")
 
 
+def offhost_collection():
+    from watchdog import collector, store
+
+    config = Path("/etc/ai-watchdog")
+    certificate = config / "fixture-collector.pem"
+    tls_key = config / "fixture-collector-key.pem"
+    credential = config / "fixture-endpoint.key"
+    receiver = config / "off-host-collector.json"
+    sender = config / "off-host-sender.json"
+    run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+        "-subj", "/CN=Watchdog fixture collector", "-addext", "subjectAltName=IP:127.0.0.1",
+        "-keyout", str(tls_key), "-out", str(certificate), capture_output=True)
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    credential.write_text(secrets.token_hex(32))
+    receiver.write_text(json.dumps({
+        "listen": "127.0.0.1", "port": port, "certificate": certificate.name, "private_key": tls_key.name,
+        "endpoints": {"fixture-endpoint": credential.name}, "silence_seconds": 30,
+    }))
+    sender.write_text(json.dumps({
+        "url": f"https://127.0.0.1:{port}", "endpoint": "fixture-endpoint",
+        "key_file": credential.name, "ca_file": certificate.name,
+    }))
+    account = pwd.getpwnam("ai-watchdog")
+    for path in (tls_key, credential, receiver, sender):
+        path.chmod(0o600)
+        os.chown(path, account.pw_uid, account.pw_gid)
+    timer = "ai-watchdog-offhost-sender.timer"
+    overrides = Path("/etc/systemd/system") / (timer + ".d")
+    overrides.mkdir()
+    (overrides / "fixture.conf").write_text(
+        "[Timer]\nOnActiveSec=\nOnActiveSec=2s\nOnUnitInactiveSec=3s\n"
+    )
+    with store.connect(STATE / "monitor.sqlite3") as db:
+        store.event(db, time.time(), "high", "offhost-fixture", "Watchdog fixture high alert")
+        store.event(db, time.time(), "medium", "offhost-fixture", "Watchdog fixture stays local")
+    run("systemctl", "daemon-reload")
+    run("systemctl", "start", "ai-watchdog-collector.service", timer)
+    database = Path("/var/lib/ai-watchdog-collector") / collector.STATE_NAME
+
+    def snapshot():
+        if database.is_file():
+            try:
+                return collector.status(database, 100)
+            except sqlite3.OperationalError as error:
+                if "no such table" not in str(error):
+                    raise
+        return {"endpoints": [], "events": [], "alerts": []}
+
+    def reporting():
+        state = snapshot()
+        return state if any(host["status"] == "reporting" for host in state["endpoints"]) and any(
+            item["title"] == "Watchdog fixture high alert" for item in state["events"]
+        ) else None
+
+    received = await_result("scheduled HTTPS endpoint report", reporting)
+    assert not any(item["title"] == "Watchdog fixture stays local" for item in received["events"])
+    run("systemctl", "stop", "ai-watchdog-response.service", "ai-watchdog.service")
+    await_result("independent host silence alert", lambda: any(
+        row["title"] == "Endpoint heartbeat missing: fixture-endpoint" for row in snapshot()["alerts"]
+    ))
+    run("systemctl", "is-active", "--quiet", "ai-watchdog-collector.service", timer)
+    run("systemctl", "start", "ai-watchdog-response.service")
+    await_result("host heartbeat recovery", lambda: any(
+        row["title"] == "Endpoint heartbeat recovered: fixture-endpoint" for row in snapshot()["alerts"]
+    ))
+    mark("OFFHOST_COLLECTION_PASS")
+
+
 def main():
     hypervisor = run("systemd-detect-virt", "--vm", capture_output=True).stdout.strip()
     if socket.gethostname() != "watchdog-defensive" or hypervisor not in {"qemu", "kvm"}:
@@ -231,6 +303,7 @@ def main():
         ssh_correlation()
         feeds()
         certificates()
+        offhost_collection()
     finally:
         server.shutdown()
     mark("GUEST_PASS")
@@ -241,6 +314,8 @@ if __name__ == "__main__":
         main()
     except Exception:
         traceback.print_exc()
-        subprocess.run(["journalctl", "--no-pager", "-n", "24", "-u", "ai-watchdog.service", "-u", REFRESH, "-u", "ssh.service"])
+        subprocess.run(["journalctl", "--no-pager", "-n", "24", "-u", "ai-watchdog.service", "-u", REFRESH,
+                        "-u", "ssh.service", "-u", "ai-watchdog-collector.service",
+                        "-u", "ai-watchdog-offhost-sender.service", "-u", "ai-watchdog-offhost-sender.timer"])
         mark("GUEST_FAIL")
         raise

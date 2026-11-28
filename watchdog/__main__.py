@@ -108,10 +108,46 @@ def main():
     receipt.add_argument("job", choices=("upload", "drill"))
     sync = actions.add_parser("backup-verifier", help="Send or import authenticated verifier results")
     sync.add_argument("operation", choices=("report", "import"))
+    collector_state = Path("/var/lib/ai-watchdog-collector")
+    offhost = actions.add_parser("off-host", help="Send, collect, or inspect off-host endpoint evidence")
+    collection = offhost.add_subparsers(dest="operation", required=True)
+    sender = collection.add_parser("send", help="Send pending events and a fresh monitor heartbeat once")
+    sender.add_argument("--settings", type=Path, required=True)
+    sender.add_argument("--directory", type=Path, default=MONITOR_STATE)
+    sender.add_argument("--runtime", type=Path, help="Directory containing the monitor heartbeat")
+    receiver = collection.add_parser("serve", help="Start the independent HTTPS collector")
+    receiver.add_argument("--settings", type=Path, required=True)
+    receiver.add_argument("--directory", type=Path, default=collector_state)
+    collected = collection.add_parser("status", help="Read collector endpoint status, events and alerts")
+    collected.add_argument("--directory", type=Path, default=collector_state)
+    collected.add_argument("--limit", type=int, default=100)
     actions.add_parser("recover", help="Restore interfaces and clear containment while the responder is stopped")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     os.umask(0o077)
+    if args.command == "off-host":
+        from . import collector, offhost as telemetry
+
+        try:
+            if args.operation == "serve":
+                args.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            metadata = args.directory.stat()
+            if not args.directory.is_dir() or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+                raise ValueError("Use a private state directory owned by the off-host process account")
+            if args.operation == "send":
+                runtime = args.runtime or (MONITOR_RUNTIME if args.directory == MONITOR_STATE else args.directory)
+                result = telemetry.send(args.directory, runtime, configuration(args.config), args.settings)
+                print(json.dumps(result))
+            elif args.operation == "serve":
+                collector.serve(args.directory, args.settings)
+            else:
+                database = args.directory / collector.STATE_NAME
+                if not database.is_file() or not 1 <= args.limit <= 1000:
+                    raise ValueError("Use an initialized collector directory and a limit between 1 and 1000")
+                print(json.dumps(collector.status(database, args.limit), indent=2))
+        except (OSError, ValueError, RecursionError, sqlite3.Error) as error:
+            parser.exit(1, f"Off-host {args.operation} failed: {error}\n")
+        return
     if args.command == "backup-result":
         from . import backup_health
 
