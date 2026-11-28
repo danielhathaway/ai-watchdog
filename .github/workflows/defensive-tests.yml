@@ -55,3 +55,6 @@ jobs:
 
       - name: Run defensive scenarios in one disposable VM
         run: bash tests/smoke/eicar_vm.sh "$RUNNER_TEMP/ubuntu-24.04-server-cloudimg-amd64.img" defensive
+
+      - name: Verify off-host delivery, outage, and recovery across two disposable VMs
+        run: python3 -B tests/smoke/offhost_vms.py "$RUNNER_TEMP/ubuntu-24.04-server-cloudimg-amd64.img"

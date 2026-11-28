@@ -442,7 +442,7 @@ This is a host-side detection and containment layer. It covers the host network 
 
 From the checkout on Linux:
 
-`Watchdog defensive tests` runs the Python suite serially on every pull request and merge-queue entry, fails on skips, and then boots one disposable Ubuntu guest. The guest verifies systemd timer activation, stale advisory alerts and recovery with local feed fixtures, a real SSH/sudo/service-start sequence, the detection and removal of a guest-only test CA, and scheduled HTTPS collection with independent silence and recovery alerts. To enforce the gate, a repository administrator must require **Watchdog defensive tests** on `main` in a branch protection rule or ruleset. [GitHub required status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging)
+`Watchdog defensive tests` runs the Python suite serially on every pull request and merge-queue entry and fails on skips. It then runs the single-guest systemd, advisory feed, SSH correlation, CA audit, and off-host checks. After that guest exits, the job runs the two-host outage check with two disposable Ubuntu VMs, each allocated 1 GiB of RAM. To enforce the gate, a repository administrator must require **Watchdog defensive tests** on `main` in a branch protection rule or ruleset. [GitHub required status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging)
 
 ```sh
 python3 -m unittest discover -s tests -v
@@ -482,6 +482,12 @@ bash tests/smoke/eicar_vm.sh /path/to/ubuntu-24.04-server-cloudimg-amd64.img def
 Each run creates a disposable disk overlay and verifies that FreshClam is enabled and downloads signatures. The Firefox test acknowledges an EICAR alert in **Open findings**, runs a clean scan after the sample is removed, checks retained coverage and timing for both results, and resolves the original finding. The upgrade modes install the pre-review commit `ae1fe37`, upgrade, use the operator rollback command and verify its state backup and dashboard health check, then reinstall the latest version to confirm the review and coverage history survived. The system-wide mode also checks per-path coverage under home-directory restrictions, reports scan limits and unreadable files, and exercises stale signature recovery using the disposable guest clock.
 
 The runner uses a loopback-only SSH tunnel for dashboard access and discards the guest and its test data afterward. A successful run prints `WATCHDOG_EICAR_VM_PASS`. The Firefox executable overrides above also apply to this test. Set `WATCHDOG_OVMF_CODE` and `WATCHDOG_OVMF_VARS` if OVMF is installed outside `/usr/share/OVMF`.
+
+Run the two-host outage check with the same verified Ubuntu image. It uses separate endpoint and collector guests, cuts only the endpoint's telemetry link, and checks for a silence alert, a recovery event, and delivery of the critical event queued during the outage.
+
+```sh
+python3 -B tests/smoke/offhost_vms.py /path/to/ubuntu-24.04-server-cloudimg-amd64.img
+```
 
 GitHub Actions runs the EICAR smoke test on pull requests and pushes to `main` that touch the installers, antivirus integration, or smoke test. The workflow also supports manual runs from the Actions tab.
 
